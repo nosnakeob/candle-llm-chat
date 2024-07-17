@@ -1,5 +1,5 @@
 [package]
-name = "candle_demo_openchat_35"
+name = "openchat_bot"
 version = "0.1.0"
 edition = "2021"
 
@@ -22,12 +22,4 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
-[[bin]]
-name = "simple"
-path = "src/simple.rs"
-
-
-[[bin]]
-name = "cli"
-path = "src/cli.rs"
 
