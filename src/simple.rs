@@ -25,6 +25,7 @@ use token_output_stream::TokenOutputStream;
 mod token_output_stream;
 mod bot;
 
+#[derive(Debug, Clone)]
 struct Args {
     // tokenizer: String,
     // model: String,
