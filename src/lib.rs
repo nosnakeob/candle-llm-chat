@@ -147,7 +147,6 @@ impl ChatBot {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::utils::{with_avx, with_f16c, with_neon, with_simd128};
     use super::*;
 
     #[tokio::test]
