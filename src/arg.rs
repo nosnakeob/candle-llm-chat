@@ -54,7 +54,7 @@ impl Args {
             total_size_in_bytes +=
                 elem_count * tensor.ggml_dtype.type_size() / tensor.ggml_dtype.block_size();
         }
-        println!(
+        info!(
             "loaded {:?} tensors ({}) in {:.2}s",
             model.tensor_infos.len(),
             &format_size(total_size_in_bytes),

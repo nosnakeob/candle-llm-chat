@@ -9,7 +9,7 @@ use candle_core::utils::{with_avx, with_f16c, with_neon, with_simd128};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // tracing_subscriber::fmt::init();
 
     quantized::cuda::set_force_dmmv(false);
 

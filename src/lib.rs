@@ -93,9 +93,8 @@ impl ChatBot {
             }
 
             let start_post_prompt = time::Instant::now();
-            let to_sample = args.sample_len.saturating_sub(1);
             let mut sampled = 1;
-            while sampled < to_sample {
+            while sampled < args.sample_len {
                 let input = Tensor::new(&[next_token], &args.device).unwrap()
                     .unsqueeze(0).unwrap();
                 let logits = model.lock().unwrap()
@@ -139,6 +138,8 @@ impl ChatBot {
             info!("{sampled} tokens generated: {:.2} token/s",
             sampled as f64 / dt.as_secs_f64(),
         );
+
+            tos.lock().unwrap().clear();
         });
 
         rx
