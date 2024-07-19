@@ -40,7 +40,7 @@ impl Args {
     }
 
     pub async fn model(&self) -> Result<ModelWeights> {
-        let (repo, filename) = ("TheBloke/openchat_3.5-GGUF", "openchat_3.5.Q2_K.gguf");
+        let (repo, filename) = ("TheBloke/openchat_3.5-GGUF", "openchat_3.5.Q4_K_M.gguf");
 
         let model_path = Api::new()?.model(repo.to_string()).get(filename).await?;
         let mut file = File::open(&model_path).await?.into_std().await;
