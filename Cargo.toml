@@ -7,19 +7,21 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-cudarc = { version = "0.11", features = ["std", "cublas", "cublaslt", "curand", "driver", "nvrtc", "f16", "cuda-version-from-build-system", "dynamic-linking"], default-features = false }
 
-candle-core = { version = "0.6", features = ["cuda"] }
-candle-transformers = { version = "0.6", features = ["cuda"] }
-clap = "4.5"
-hf-hub = { version = "0.3", features = ["tokio"] }
-tokenizers = "0.19"
+intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"] }
 
-futures = "0.3"
+candle = { package = "candle-core", version = "0.8", features = ["cuda"] }
+candle-transformers = { version = "0.8", features = ["cuda"] }
+candle-examples = "0.8"
+
+hf-hub = { version = "0.4", features = ["tokio"] }
+tokenizers = "0.21"
+
 tokio = { version = "1", features = ["full"] }
-
 
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+encoding_rs = "0.8"
 
 
