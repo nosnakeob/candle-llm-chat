@@ -2,6 +2,7 @@ extern crate intel_mkl_src;
 
 use crate::utils::format_size;
 use std::path::PathBuf;
+use std::process::Command;
 use tokenizers::Tokenizer;
 
 use hf_hub::api::tokio::Api;
@@ -12,6 +13,7 @@ use candle_transformers::generation::{LogitsProcessor, Sampling};
 
 use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::models::quantized_qwen2::ModelWeights as Qwen2;
+use hf_hub::{Cache, Repo};
 
 const DEFAULT_PROMPT: &str = "编写一个函数来计算小于等于N的质数数量。";
 
@@ -28,6 +30,69 @@ enum Which {
     W25_7b,
     W25_14b,
     W25_32b,
+}
+
+impl Which {
+    // 返回tokenizer, model repo, filename
+    fn info(self) -> (&'static str, &'static str, &'static str, &'static str) {
+        let tokenizer_fname = "tokenizer.json";
+        match self {
+            Which::W2_0_5b => (
+                "Qwen/Qwen2-0.5B-Instruct",
+                tokenizer_fname,
+                "Qwen/Qwen2-0.5B-Instruct-GGUF",
+                "qwen2-0_5b-instruct-q4_0.gguf",
+            ),
+            Which::W2_1_5b => (
+                "Qwen/Qwen2-1.5B-Instruct",
+                tokenizer_fname,
+                "Qwen/Qwen2-1.5B-Instruct-GGUF",
+                "qwen2-1_5b-instruct-q4_0.gguf",
+            ),
+            Which::W2_7b => (
+                "Qwen/Qwen2-7B-Instruct",
+                tokenizer_fname,
+                "Qwen/Qwen2-7B-Instruct-GGUF",
+                "qwen2-7b-instruct-q4_0.gguf",
+            ),
+            Which::W2_72b => (
+                "Qwen/Qwen2-72B-Instruct",
+                tokenizer_fname,
+                "Qwen/Qwen2-72B-Instruct-GGUF",
+                "qwen2-72b-instruct-q4_0.gguf",
+            ),
+            Which::W25_0_5b => (
+                "Qwen/Qwen2.5-0.5B-Instruct",
+                tokenizer_fname,
+                "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+                "qwen2.5-0.5b-instruct-q4_0.gguf",
+            ),
+            Which::W25_1_5b => (
+                "Qwen/Qwen2.5-1.5B-Instruct",
+                tokenizer_fname,
+                "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+                "qwen2.5-1.5b-instruct-q4_0.gguf",
+            ),
+            Which::W25_7b => (
+                "Qwen/Qwen2.5-7B-Instruct",
+                tokenizer_fname,
+                "Qwen/Qwen2.5-7B-Instruct-GGUF",
+                "qwen2.5-7b-instruct-q4_0.gguf",
+            ),
+            Which::W25_14b => (
+                "Qwen/Qwen2.5-14B-Instruct",
+                tokenizer_fname,
+                "Qwen/Qwen2.5-14B-Instruct-GGUF",
+                "qwen2.5-14b-instruct-q4_0.gguf",
+            ),
+            Which::W25_32b => (
+                "Qwen/Qwen2.5-32B-Instruct",
+                tokenizer_fname,
+                "Qwen/Qwen2.5-32B-Instruct-GGUF",
+                "qwen2.5-32b-instruct-q4_0.gguf",
+            ),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -62,61 +127,64 @@ struct Args {
 
 impl Args {
     async fn tokenizer(&self) -> Result<Tokenizer> {
-        let repo = match self.which {
-            Which::W2_0_5b => "Qwen/Qwen2-0.5B-Instruct",
-            Which::W2_1_5b => "Qwen/Qwen2-1.5B-Instruct",
-            Which::W2_7b => "Qwen/Qwen2-7B-Instruct",
-            Which::W2_72b => "Qwen/Qwen2-72B-Instruct",
-            Which::W25_0_5b => "Qwen/Qwen2.5-0.5B-Instruct",
-            Which::W25_1_5b => "Qwen/Qwen2.5-1.5B-Instruct",
-            Which::W25_7b => "Qwen/Qwen2.5-7B-Instruct",
-            Which::W25_14b => "Qwen/Qwen2.5-14B-Instruct",
-            Which::W25_32b => "Qwen/Qwen2.5-32B-Instruct",
-        };
-        let tokenizer_path = Api::new()?
-            .model(repo.to_string())
-            .get("tokenizer.json")
-            .await?;
+        let (repo, filename, _, _) = self.which.info();
+        let tokenizer_path = Api::new()?.model(repo.to_string()).get(filename).await?;
         Tokenizer::from_file(tokenizer_path).map_err(Error::msg)
     }
 
     async fn model(&self) -> Result<PathBuf> {
-        let (repo, filename) = match self.which {
-            Which::W2_0_5b => (
-                "Qwen/Qwen2-0.5B-Instruct-GGUF",
-                "qwen2-0_5b-instruct-q4_0.gguf",
-            ),
-            Which::W2_1_5b => (
-                "Qwen/Qwen2-1.5B-Instruct-GGUF",
-                "qwen2-1_5b-instruct-q4_0.gguf",
-            ),
-            Which::W2_7b => ("Qwen/Qwen2-7B-Instruct-GGUF", "qwen2-7b-instruct-q4_0.gguf"),
-            Which::W2_72b => (
-                "Qwen/Qwen2-72B-Instruct-GGUF",
-                "qwen2-72b-instruct-q4_0.gguf",
-            ),
-            Which::W25_0_5b => (
-                "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-                "qwen2.5-0.5b-instruct-q4_0.gguf",
-            ),
-            Which::W25_1_5b => (
-                "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-                "qwen2.5-1.5b-instruct-q4_0.gguf",
-            ),
-            Which::W25_7b => (
-                "Qwen/Qwen2.5-7B-Instruct-GGUF",
-                "qwen2.5-7b-instruct-q4_0*.gguf",
-            ),
-            Which::W25_14b => (
-                "Qwen/Qwen2.5-14B-Instruct-GGUF",
-                "qwen2.5-14b-instruct-q4_0.gguf",
-            ),
-            Which::W25_32b => (
-                "Qwen/Qwen2.5-32B-Instruct-GGUF",
-                "qwen2.5-32b-instruct-q4_0.gguf",
-            ),
+        let (_, _, repo, filename) = self.which.info();
+
+        let model_path = if let Some(path) = Cache::default()
+            .repo(Repo::model(repo.to_string()))
+            .get(filename)
+        {
+            path
+        } else {
+            let repo = Api::new()?.model(repo.to_string());
+
+            let split_filenames: Vec<String> = repo
+                .info()
+                .await?
+                .siblings
+                .into_iter()
+                .map(|sibling| sibling.rfilename)
+                .filter(|s| s.starts_with(filename.strip_suffix(".gguf").unwrap()))
+                .collect();
+
+            let mut split_paths = vec![];
+            for filename in &split_filenames {
+                split_paths.push(repo.get(filename).await?);
+            }
+
+            // 获取输出目录
+            let output_dir = split_paths[0].parent().unwrap();
+            // println!("{:?}", output_dir);
+
+            let merged_path = output_dir.join(filename);
+
+            // 构建命令
+            let exe_path = which::which("llama-gguf-split")?;
+            let mut command = Command::new(exe_path);
+            command
+                .arg("--merge")
+                .arg(split_paths[0].to_str().unwrap())
+                .arg(merged_path.to_str().unwrap());
+
+            // println!("{:?}", command);
+
+            // 执行命令
+            let output = command.output()?;
+
+            if !output.status.success() {
+                let error = String::from_utf8_lossy(&output.stderr);
+                return Err(Error::msg(format!("gguf-utils merge failed: {}", error)));
+            }
+
+            let merged_path = output_dir.join(filename);
+            merged_path
         };
-        let model_path = Api::new()?.model(repo.to_string()).get(filename).await?;
+
         Ok(model_path)
     }
 }
@@ -132,7 +200,7 @@ impl Default for Args {
             cpu: false,
             repeat_penalty: 1.1,
             repeat_last_n: 64,
-            which: Which::W2_7b,
+            which: Which::W25_7b,
         }
     }
 }
@@ -188,145 +256,21 @@ fn setup_logits_processor(args: &Args) -> LogitsProcessor {
 mod tests {
     use super::*;
     use candle::Tensor;
-    use hf_hub::{Cache, Repo};
     use std::env;
-    use std::io::{self, BufRead, Write};
-    use std::process::Command;
-    use encoding_rs::GB18030;
-    
-    #[test]
-    fn test_cmd() -> Result<()> {
-        // 在 Windows 中使用 dir 命令代替 ls
-        let output = Command::new("cmd")
-            .args(&["/C", "dir"])
-            // 设置命令输出的编码为 UTF-8
-            .env("PYTHONIOENCODING", "utf-8")
-            // 使用系统默认代码页
-            .output()?;
-        
-        if output.status.success() {
-            // 使用 GB18030 解码 Windows 命令行输出
-            let stdout = GB18030.decode(&output.stdout).0;
-            println!("Command output: {}", stdout);
-        } else {
-            let stderr = GB18030.decode(&output.stderr).0;
-            eprintln!("Command failed with error: {}", stderr);
-        }
-        
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_get_qwen() -> Result<()> {
-        env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
-
-        let which = Which::W25_7b;
-
-        let (repo_str, filename) = match which {
-            Which::W2_0_5b => (
-                "Qwen/Qwen2-0.5B-Instruct-GGUF",
-                "qwen2-0_5b-instruct-q4_0.gguf",
-            ),
-            Which::W2_1_5b => (
-                "Qwen/Qwen2-1.5B-Instruct-GGUF",
-                "qwen2-1_5b-instruct-q4_0.gguf",
-            ),
-            Which::W2_7b => ("Qwen/Qwen2-7B-Instruct-GGUF", "qwen2-7b-instruct-q4_0.gguf"),
-            Which::W2_72b => (
-                "Qwen/Qwen2-72B-Instruct-GGUF",
-                "qwen2-72b-instruct-q4_0.gguf",
-            ),
-            Which::W25_0_5b => (
-                "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-                "qwen2.5-0.5b-instruct-q4_0.gguf",
-            ),
-            Which::W25_1_5b => (
-                "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-                "qwen2.5-1.5b-instruct-q4_0.gguf",
-            ),
-            Which::W25_7b => (
-                "Qwen/Qwen2.5-7B-Instruct-GGUF",
-                "qwen2.5-7b-instruct-q4_0.gguf",
-            ),
-            Which::W25_14b => (
-                "Qwen/Qwen2.5-14B-Instruct-GGUF",
-                "qwen2.5-14b-instruct-q4_0.gguf",
-            ),
-            Which::W25_32b => (
-                "Qwen/Qwen2.5-32B-Instruct-GGUF",
-                "qwen2.5-32b-instruct-q4_0.gguf",
-            ),
-        };
-
-        let model_path = if let Some(path) = Cache::default()
-            .repo(Repo::model(repo_str.to_string()))
-            .get(filename)
-        {
-            path
-        } else {
-            let repo = Api::new()?.model(repo_str.to_string());
-            let info = repo.info().await?;
-            // println!("{:?}", info);
-
-            let stem = filename.strip_suffix(".gguf").unwrap();
-
-            let split_filenames: Vec<String> = info
-                .siblings
-                .into_iter()
-                .map(|sibling| sibling.rfilename)
-                .filter(|s| s.starts_with(stem))
-                .collect();
-
-            let mut split_paths = vec![];
-            for filename in &split_filenames {
-                split_paths.push(repo.get(filename).await?);
-            }
-
-            println!("Downloaded split files: {:#?}", split_paths);
-
-            // 获取输出目录
-            let output_dir = split_paths[0].parent().unwrap();
-            println!("{:?}", output_dir);
-
-            let merged_path = output_dir.join(filename);
-
-            // 构建命令
-            let mut command = Command::new("copy");
-            command
-                .arg("/b")
-                .arg(format!("{stem}*.gguf"))
-                .arg(merged_path.to_str().unwrap());
-            
-            println!("{:?}", command);
-
-            // 执行命令
-            let output = command.output()?;
-            
-            if !output.status.success() {
-                let error = String::from_utf8_lossy(&output.stderr);
-                return Err(Error::msg(format!("gguf-utils merge failed: {}", error)));
-            }
-            
-            let merged_path = output_dir.join(filename);
-            merged_path
-            // Default::default()
-        };
-
-        env::remove_var("HTTPS_PROXY");
-        Ok(())
-    }
+    use std::io::{self, Write};
 
     fn get_user_prompt() -> String {
-        println!("请输入您的问题 (直接回车使用默认问题):");
-        let stdin = io::stdin();
-        let mut line = String::new();
-        stdin
-            .lock()
-            .read_line(&mut line)
-            .expect("Failed to read line");
-
-        // 去除末尾的换行符
-        line = line.trim().to_string();
+        // println!("请输入您的问题 (直接回车使用默认问题):");
+        // let stdin = io::stdin();
+        // let mut line = String::new();
+        // stdin
+        //     .lock()
+        //     .read_line(&mut line)
+        //     .expect("Failed to read line");
+        //
+        // // 去除末尾的换行符
+        // line = line.trim().to_string();
+        let line = String::from(DEFAULT_PROMPT);
 
         if line.is_empty() {
             DEFAULT_PROMPT.to_string()
@@ -434,13 +378,8 @@ mod tests {
         let prompt = user_prompt;
 
         let start_prompt_processing = std::time::Instant::now();
-        let (tokens, next_token) = process_prompt(
-            prompt,
-            &mut model,
-            &mut tos,
-            &device,
-            &mut logits_processor,
-        )?;
+        let (tokens, next_token) =
+            process_prompt(prompt, &mut model, &mut tos, &device, &mut logits_processor)?;
         let prompt_dt = start_prompt_processing.elapsed();
 
         let start_post_prompt = std::time::Instant::now();

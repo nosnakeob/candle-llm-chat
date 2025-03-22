@@ -1,4 +1,3 @@
-
 pub fn format_size(size_in_bytes: usize) -> String {
     if size_in_bytes < 1_000 {
         format!("{}B", size_in_bytes)
@@ -10,4 +9,3 @@ pub fn format_size(size_in_bytes: usize) -> String {
         format!("{:.2}GB", size_in_bytes as f64 / 1e9)
     }
 }
-
