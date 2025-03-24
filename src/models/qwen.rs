@@ -256,6 +256,13 @@ fn setup_logits_processor(args: &Args) -> LogitsProcessor {
     LogitsProcessor::from_sampling(args.seed, sampling)
 }
 
+fn fmt_prompt(prompt: &str) -> String {
+    format!(
+        "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+        prompt
+    )
+}
+
 fn get_user_prompt() -> String {
     println!("请输入您的问题 (直接回车使用默认问题):");
     let stdin = io::stdin();
@@ -274,6 +281,10 @@ fn get_user_prompt() -> String {
     } else {
         line
     }
+}
+
+fn token2str(token: u32, tokenizer: &Tokenizer) -> Result<String> {
+    tokenizer.decode(&[token], true).map_err(Error::msg)
 }
 
 // 处理提示词
@@ -359,94 +370,9 @@ mod tests {
     use std::env;
     use tokio::select;
 
+    // 用tos输出奇怪
     #[tokio::test]
     async fn test_prompt() -> Result<()> {
-        // 初始化默认参数和设备
-        let args = Args::default();
-
-        // 初始化模型、分词器和logits处理器
-        let (mut model, device) = setup_model(&args).await?;
-        let mut tos = setup_tokenizer(&args).await?;
-        let mut logits_processor = setup_logits_processor(&args);
-
-        // 初始化上下文token列表和测试提示词
-        let mut ctx_tokens = vec![];
-        let prompts = vec!["我是snake，你给我记住了", "还记得我是谁吗"];
-
-        // 获取结束符token和采样长度
-        let eos_token = *tos.tokenizer().get_vocab(true).get("<|im_end|>").unwrap();
-        let to_sample = args.sample_len.saturating_sub(1);
-
-        // 循环处理每个提示词
-        for (turn, prompt_str) in prompts.iter().enumerate() {
-            // 格式化提示词，添加对话标记
-            let prompt_str = format!(
-                "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
-                prompt_str
-            );
-
-            // 将提示词转换为token
-            let tokens = tos
-                .tokenizer()
-                .encode(prompt_str, true)
-                .map_err(Error::msg)?;
-            let prompt_tokens = tokens.get_ids();
-
-            // 将提示词token添加到上下文中
-            ctx_tokens.extend_from_slice(&prompt_tokens);
-
-            // 生成第一个token
-            let first_token = {
-                let input = Tensor::new(&*ctx_tokens, &device)?.unsqueeze(0)?;
-                let logits = model.forward(&input, 0)?;
-                let logits = logits.squeeze(0)?;
-                logits_processor.sample(&logits)?
-            };
-
-            // 初始化回答token列表
-            let mut next_token = first_token;
-            let mut ans_tokens = vec![next_token];
-
-            // 循环生成回答tokens
-            for index in 0..to_sample {
-                let input = Tensor::new(&[next_token], &device)?.unsqueeze(0)?;
-                let logits = model.forward(&input, ctx_tokens.len() + index)?;
-                let logits = logits.squeeze(0)?;
-
-                // 应用重复惩罚
-                let logits = if args.repeat_penalty == 1. {
-                    logits
-                } else {
-                    let start_at = ans_tokens.len().saturating_sub(args.repeat_last_n);
-                    apply_repeat_penalty(&logits, args.repeat_penalty, &ans_tokens[start_at..])?
-                };
-
-                // 采样下一个token
-                next_token = logits_processor.sample(&logits)?;
-                ans_tokens.push(next_token);
-
-                // 如果遇到结束符则停止生成
-                if next_token == eos_token {
-                    break;
-                };
-            }
-
-            // 将回答token添加到上下文中
-            ctx_tokens.extend_from_slice(&ans_tokens);
-
-            // 打印当前轮次的对话内容
-            println!("Turn {}:", turn + 1);
-            ans_tokens.iter().for_each(|&token| {
-                print!("{}", tos.tokenizer().decode(&[token], true).unwrap());
-            });
-            println!();
-        }
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_gen() -> Result<()> {
         env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
         let args = Args::default();
         println!("{args:?}");
@@ -456,22 +382,24 @@ mod tests {
         let mut tos = setup_tokenizer(&args).await?;
         let mut logits_processor = setup_logits_processor(&args);
 
-        let mut first_turn = true;
-
         // 初始化上下文token列表
         let mut ctx_tokens = vec![];
         let eos_token = *tos.tokenizer().get_vocab(true).get("<|im_end|>").unwrap();
         let to_sample = args.sample_len.saturating_sub(1);
 
-        loop {
-            // 获取用户输入
-            let prompt_str = get_user_prompt();
+        let mut first_turn = true;
 
+        let prompts = vec![
+            "我是snake，你给我记住了",
+            "还记得我是谁吗",
+            "你是谁",
+            "给我笑一笑",
+        ];
+
+        // loop {
+        for prompt_str in prompts {
             // 格式化提示词
-            let prompt_str = format!(
-                "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
-                prompt_str
-            );
+            let prompt_str = fmt_prompt(prompt_str);
 
             // 将提示词转换为token并添加到上下文
             let tokens = tos
@@ -486,7 +414,7 @@ mod tests {
             // 生成第一个token
             let first_token = {
                 let input = Tensor::new(&*ctx_tokens, &device)?.unsqueeze(0)?;
-                let logits = model.forward(&input, 1)?;
+                let logits = model.forward(&input, 0)?;
                 let logits = logits.squeeze(0)?;
                 logits_processor.sample(&logits)?
             };
@@ -494,10 +422,9 @@ mod tests {
             // 初始化回答token列表
             let mut next_token = first_token;
             let mut ans_tokens = vec![next_token];
-            if let Some(t) = tos.next_token(next_token)? && first_turn {
+            if let Some(t) = tos.next_token(next_token)? {
                 print!("{t}");
                 io::stdout().flush()?;
-                first_turn = false;
             }
 
             // 循环生成回答
@@ -526,8 +453,184 @@ mod tests {
                 }
             }
 
-            if let Some(rest) = tos.decode_rest().map_err(Error::msg)? {
-                print!("{rest}");
+            // 将回答添加到上下文
+            ctx_tokens.extend_from_slice(&ans_tokens);
+            let dt = start.elapsed();
+
+            println!(
+                "\n\n生成速度: {:.2} token/s",
+                ans_tokens.len() as f64 / dt.as_secs_f64(),
+            );
+        }
+
+        env::remove_var("HTTPS_PROXY");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_prompt_wo_tos() -> Result<()> {
+        env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
+        let args = Args::default();
+        println!("{args:?}");
+
+        // 初始化模型、分词器和logits处理器
+        let (mut model, device) = setup_model(&args).await?;
+        let tokenizer = args.tokenizer().await?;
+        let mut logits_processor = setup_logits_processor(&args);
+
+        // 初始化上下文token列表
+        let mut ctx_tokens = vec![];
+        let eos_token = *tokenizer.get_vocab(true).get("<|im_end|>").unwrap();
+        let to_sample = args.sample_len.saturating_sub(1);
+
+        let prompts = vec![
+            "我是snake，你给我记住了",
+            "还记得我是谁吗",
+            "你是谁",
+            "给我笑一笑",
+        ];
+
+        // loop {
+        for prompt_str in prompts {
+            // 获取用户输入
+            // let prompt_str = get_user_prompt();
+
+            // 格式化提示词
+            let prompt_str = fmt_prompt(prompt_str);
+
+            // 将提示词转换为token并添加到上下文
+            let tokens = tokenizer.encode(prompt_str, true).map_err(Error::msg)?;
+            let prompt_tokens = tokens.get_ids();
+            ctx_tokens.extend_from_slice(&prompt_tokens);
+
+            let start = std::time::Instant::now();
+
+            // 生成第一个token
+            let first_token = {
+                let input = Tensor::new(&*ctx_tokens, &device)?.unsqueeze(0)?;
+                let logits = model.forward(&input, 0)?;
+                let logits = logits.squeeze(0)?;
+                logits_processor.sample(&logits)?
+            };
+
+            // 初始化回答token列表
+            let mut next_token = first_token;
+            let mut ans_tokens = vec![next_token];
+            if let Ok(t) = token2str(next_token, &tokenizer) {
+                print!("{t}");
+                io::stdout().flush()?;
+            }
+
+            // 循环生成回答
+            for index in 0..to_sample {
+                let input = Tensor::new(&[next_token], &device)?.unsqueeze(0)?;
+                let logits = model.forward(&input, ctx_tokens.len() + index)?;
+                let logits = logits.squeeze(0)?;
+
+                let logits = if args.repeat_penalty == 1. {
+                    logits
+                } else {
+                    let start_at = ans_tokens.len().saturating_sub(args.repeat_last_n);
+                    apply_repeat_penalty(&logits, args.repeat_penalty, &ans_tokens[start_at..])?
+                };
+
+                next_token = logits_processor.sample(&logits)?;
+                ans_tokens.push(next_token);
+
+                if let Ok(t) = token2str(next_token, &tokenizer) {
+                    print!("{t}");
+                    io::stdout().flush()?;
+                }
+
+                if next_token == eos_token {
+                    break;
+                }
+            }
+
+            // 将回答添加到上下文
+            ctx_tokens.extend_from_slice(&ans_tokens);
+            let dt = start.elapsed();
+
+            println!(
+                "\n\n生成速度: {:.2} token/s",
+                ans_tokens.len() as f64 / dt.as_secs_f64(),
+            );
+        }
+
+        env::remove_var("HTTPS_PROXY");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_gen() -> Result<()> {
+        env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
+        let args = Args::default();
+        println!("{args:?}");
+
+        // 初始化模型、分词器和logits处理器
+        let (mut model, device) = setup_model(&args).await?;
+        let tokenizer = args.tokenizer().await?;
+        let mut logits_processor = setup_logits_processor(&args);
+
+        // 初始化上下文token列表
+        let mut ctx_tokens = vec![];
+        let eos_token = *tokenizer.get_vocab(true).get("<|im_end|>").unwrap();
+        let to_sample = args.sample_len.saturating_sub(1);
+
+        loop {
+            // 获取用户输入
+            let prompt_str = get_user_prompt();
+
+            // 格式化提示词
+            let prompt_str = fmt_prompt(&prompt_str);
+
+            // 将提示词转换为token并添加到上下文
+            let tokens = tokenizer.encode(prompt_str, true).map_err(Error::msg)?;
+            let prompt_tokens = tokens.get_ids();
+            ctx_tokens.extend_from_slice(&prompt_tokens);
+
+            let start = std::time::Instant::now();
+
+            // 生成第一个token
+            let first_token = {
+                let input = Tensor::new(&*ctx_tokens, &device)?.unsqueeze(0)?;
+                let logits = model.forward(&input, 0)?;
+                let logits = logits.squeeze(0)?;
+                logits_processor.sample(&logits)?
+            };
+
+            // 初始化回答token列表
+            let mut next_token = first_token;
+            let mut ans_tokens = vec![next_token];
+            if let Ok(t) = token2str(next_token, &tokenizer) {
+                print!("{t}");
+                io::stdout().flush()?;
+            }
+
+            // 循环生成回答
+            for index in 0..to_sample {
+                let input = Tensor::new(&[next_token], &device)?.unsqueeze(0)?;
+                let logits = model.forward(&input, ctx_tokens.len() + index)?;
+                let logits = logits.squeeze(0)?;
+
+                let logits = if args.repeat_penalty == 1. {
+                    logits
+                } else {
+                    let start_at = ans_tokens.len().saturating_sub(args.repeat_last_n);
+                    apply_repeat_penalty(&logits, args.repeat_penalty, &ans_tokens[start_at..])?
+                };
+
+                next_token = logits_processor.sample(&logits)?;
+                ans_tokens.push(next_token);
+
+                if let Ok(t) = token2str(next_token, &tokenizer) {
+                    print!("{t}");
+                    io::stdout().flush()?;
+                }
+
+                if next_token == eos_token {
+                    break;
+                }
             }
 
             // 将回答添加到上下文
