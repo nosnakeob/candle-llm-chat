@@ -19,8 +19,6 @@ use candle_transformers::models::quantized_qwen2::ModelWeights as Qwen2;
 use candle_transformers::utils::apply_repeat_penalty;
 use hf_hub::{Cache, Repo};
 
-const DEFAULT_PROMPT: &str = "编写一个函数来计算小于等于N的质数数量。";
-
 #[allow(unused)]
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
 enum Which {
@@ -274,13 +272,8 @@ fn get_user_prompt() -> String {
 
     // 去除末尾的换行符
     line = line.trim().to_string();
-    // let line = String::from(DEFAULT_PROMPT);
 
-    if line.is_empty() {
-        DEFAULT_PROMPT.to_string()
-    } else {
-        line
-    }
+    line
 }
 
 fn token2str(token: u32, tokenizer: &Tokenizer) -> Result<String> {

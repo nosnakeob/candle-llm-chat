@@ -17,12 +17,30 @@
 - Python 3.x
 - CUDA 工具包 (用于GPU加速)
 
-### 2. 下载权重
+### 2. 国内下载模型
+
+有两种方式可以在国内下载 Hugging Face 模型：
+
+#### 方式一：使用镜像
+```rust
+ApiBuilder::new()
+    .with_endpoint("https://hf-mirror.com".to_string())
+    .build()?;
+```
+
+#### 方式二：设置代理
+```rust
+std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");  // 设置代理
+// ... 下载模型的代码 ...
+std::env::remove_var("HTTPS_PROXY");  // 使用完后移除代理
+```
+
+### 3. 下载权重
 
 1. 修改`download_model.py`, `arg::Args::model`中的openchat文件名
 2. 运行`python download_model.py`
 
-### 3. 运行
+### 4. 运行
 
 ```
 cargo run --release
@@ -56,9 +74,7 @@ cmake -S . -B build
 cmake --build build --config Release
 ```
 
-3. 将生成的可执行文件添加到系统 PATH:
-- Windows: 将 `build/bin/Release` 目录添加到系统环境变量
-- Linux/Mac: 将可执行文件链接到 `/usr/local/bin`
+3. 将生成的可执行文件添加到系统 PATH
 
 ### 自动合并
 
