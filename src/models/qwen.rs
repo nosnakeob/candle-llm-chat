@@ -308,13 +308,13 @@ fn gen_next_token(
         let input = Tensor::new(&[*ctx_tokens.last().unwrap()], device)?.unsqueeze(0)?;
         let mut logits = model.forward(&input, idx_pos)?;
         logits = logits.squeeze(0)?;
-        
+
         if repeat_penalty != 1. {
             let ans_tokens = &ctx_tokens[ans_start_idx..];
             let start_at = ans_tokens.len().saturating_sub(repeat_last_n);
             logits = apply_repeat_penalty(&logits, repeat_penalty, &ans_tokens[start_at..])?
         };
-        
+
         logits
     } else {
         let input = Tensor::new(ctx_tokens, device)?.unsqueeze(0)?;
@@ -357,32 +357,25 @@ mod tests {
             "给我笑一笑",
         ];
 
-        // loop {
         for prompt_str in prompts {
-            // 格式化提示词
-            let prompt_str = fmt_prompt(prompt_str);
-
-            // 将提示词转换为token并添加到上下文
-            let tokens = tos
-                .tokenizer()
-                .encode(prompt_str, true)
-                .map_err(Error::msg)?;
-            let prompt_tokens = tokens.get_ids();
-            ctx_tokens.extend_from_slice(prompt_tokens);
+            let prompt_tokens = process_prompt(&prompt_str, tos.tokenizer())?;
+            ctx_tokens.extend_from_slice(&prompt_tokens);
 
             let start = std::time::Instant::now();
 
             // 生成第一个token
-            let first_token = {
-                let input = Tensor::new(&*ctx_tokens, &device)?.unsqueeze(0)?;
-                let logits = model.forward(&input, 0)?;
-                let logits = logits.squeeze(0)?;
-                logits_processor.sample(&logits)?
-            };
-
-            // 初始化回答token列表
-            let mut next_token = first_token;
-            let mut ans_tokens = vec![next_token];
+            let mut next_token = gen_next_token(
+                &ctx_tokens,
+                0,
+                &mut model,
+                &device,
+                &mut logits_processor,
+                None,
+                None,
+                None,
+            )?;
+            let ans_start_idx = ctx_tokens.len();
+            ctx_tokens.push(next_token);
             if let Some(t) = tos.next_token(next_token)? {
                 print!("{t}");
                 io::stdout().flush()?;
@@ -390,19 +383,17 @@ mod tests {
 
             // 循环生成回答
             for index in 0..to_sample {
-                let input = Tensor::new(&[next_token], &device)?.unsqueeze(0)?;
-                let logits = model.forward(&input, ctx_tokens.len() + index)?;
-                let logits = logits.squeeze(0)?;
-
-                let logits = if args.repeat_penalty == 1. {
-                    logits
-                } else {
-                    let start_at = ans_tokens.len().saturating_sub(args.repeat_last_n);
-                    apply_repeat_penalty(&logits, args.repeat_penalty, &ans_tokens[start_at..])?
-                };
-
-                next_token = logits_processor.sample(&logits)?;
-                ans_tokens.push(next_token);
+                next_token = gen_next_token(
+                    &ctx_tokens,
+                    ans_start_idx + index,
+                    &mut model,
+                    &device,
+                    &mut logits_processor,
+                    Some(ans_start_idx),
+                    Some(args.repeat_penalty),
+                    Some(args.repeat_last_n),
+                )?;
+                ctx_tokens.push(next_token);
 
                 if let Some(t) = tos.next_token(next_token)? {
                     print!("{t}");
@@ -414,13 +405,11 @@ mod tests {
                 }
             }
 
-            // 将回答添加到上下文
-            ctx_tokens.extend_from_slice(&ans_tokens);
             let dt = start.elapsed();
 
             println!(
                 "\n\n生成速度: {:.2} token/s",
-                ans_tokens.len() as f64 / dt.as_secs_f64(),
+                (ctx_tokens.len() - ans_start_idx) as f64 / dt.as_secs_f64(),
             );
         }
 
@@ -451,32 +440,26 @@ mod tests {
             "给我笑一笑",
         ];
 
-        // loop {
         for prompt_str in prompts {
-            // 获取用户输入
-            // let prompt_str = get_user_prompt();
-
-            // 格式化提示词
-            let prompt_str = fmt_prompt(prompt_str);
-
             // 将提示词转换为token并添加到上下文
-            let tokens = tokenizer.encode(prompt_str, true).map_err(Error::msg)?;
-            let prompt_tokens = tokens.get_ids();
-            ctx_tokens.extend_from_slice(prompt_tokens);
+            let prompt_tokens = process_prompt(&prompt_str, &tokenizer)?;
+            ctx_tokens.extend_from_slice(&prompt_tokens);
 
             let start = std::time::Instant::now();
 
             // 生成第一个token
-            let first_token = {
-                let input = Tensor::new(&*ctx_tokens, &device)?.unsqueeze(0)?;
-                let logits = model.forward(&input, 0)?;
-                let logits = logits.squeeze(0)?;
-                logits_processor.sample(&logits)?
-            };
-
-            // 初始化回答token列表
-            let mut next_token = first_token;
-            let mut ans_tokens = vec![next_token];
+            let mut next_token = gen_next_token(
+                &ctx_tokens,
+                0,
+                &mut model,
+                &device,
+                &mut logits_processor,
+                None,
+                None,
+                None,
+            )?;
+            let ans_start_idx = ctx_tokens.len();
+            ctx_tokens.push(next_token);
             if let Ok(t) = token2str(next_token, &tokenizer) {
                 print!("{t}");
                 io::stdout().flush()?;
@@ -484,19 +467,17 @@ mod tests {
 
             // 循环生成回答
             for index in 0..to_sample {
-                let input = Tensor::new(&[next_token], &device)?.unsqueeze(0)?;
-                let logits = model.forward(&input, ctx_tokens.len() + index)?;
-                let logits = logits.squeeze(0)?;
-
-                let logits = if args.repeat_penalty == 1. {
-                    logits
-                } else {
-                    let start_at = ans_tokens.len().saturating_sub(args.repeat_last_n);
-                    apply_repeat_penalty(&logits, args.repeat_penalty, &ans_tokens[start_at..])?
-                };
-
-                next_token = logits_processor.sample(&logits)?;
-                ans_tokens.push(next_token);
+                next_token = gen_next_token(
+                    &ctx_tokens,
+                    ans_start_idx + index,
+                    &mut model,
+                    &device,
+                    &mut logits_processor,
+                    Some(ans_start_idx),
+                    Some(args.repeat_penalty),
+                    Some(args.repeat_last_n),
+                )?;
+                ctx_tokens.push(next_token);
 
                 if let Ok(t) = token2str(next_token, &tokenizer) {
                     print!("{t}");
@@ -509,12 +490,11 @@ mod tests {
             }
 
             // 将回答添加到上下文
-            ctx_tokens.extend_from_slice(&ans_tokens);
             let dt = start.elapsed();
 
             println!(
                 "\n\n生成速度: {:.2} token/s",
-                ans_tokens.len() as f64 / dt.as_secs_f64(),
+                (ctx_tokens.len() - ans_start_idx) as f64 / dt.as_secs_f64(),
             );
         }
 
