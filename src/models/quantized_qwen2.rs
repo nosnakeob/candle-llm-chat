@@ -1,26 +1,31 @@
 extern crate intel_mkl_src;
 
 use crate::utils::format_size;
-use std::io::Write;
 use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::process::Command;
+
+use async_stream::try_stream;
+
+use futures_core::stream::Stream;
+use futures_util::pin_mut;
+use futures_util::stream::StreamExt;
+
 use tokenizers::Tokenizer;
 
 use hf_hub::api::tokio::Api;
 
-use anyhow::{Error, Result};
+use anyhow::{bail, Error, Result};
 use candle::quantized::gguf_file;
-use candle::Tensor;
+use candle::{Device, Tensor};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 
-use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::models::quantized_qwen2::ModelWeights;
 use candle_transformers::utils::apply_repeat_penalty;
 use hf_hub::{Cache, Repo};
 
 #[allow(unused)]
-#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Which {
     // gpu推理报错
     W2_0_5b,
@@ -36,7 +41,7 @@ enum Which {
 
 impl Which {
     // 返回tokenizer, model repo, filename
-    fn info(self) -> (&'static str, &'static str, &'static str, &'static str) {
+    fn info(&self) -> (&'static str, &'static str, &'static str, &'static str) {
         let tokenizer_fname = "tokenizer.json";
         match self {
             Which::W2_0_5b => (
@@ -97,8 +102,8 @@ impl Which {
     }
 }
 
-#[derive(Debug)]
-struct Args {
+#[derive(Debug, Clone)]
+pub struct Args {
     /// The length of the sample to generate (in tokens).
     sample_len: usize,
 
@@ -114,8 +119,7 @@ struct Args {
     /// The seed to use when generating random samples.
     seed: u64,
 
-    /// Run on CPU rather than GPU even if a GPU is available.
-    cpu: bool,
+    device: Device,
 
     /// Penalty to be applied for repeating tokens, 1. means no penalty.
     repeat_penalty: f32,
@@ -128,10 +132,13 @@ struct Args {
 }
 
 impl Args {
-    async fn tokenizer(&self) -> Result<Tokenizer> {
+    async fn tokenizer(&self) -> Result<PathBuf> {
         let (repo, filename, _, _) = self.which.info();
-        let tokenizer_path = Api::new()?.model(repo.to_string()).get(filename).await?;
-        Tokenizer::from_file(tokenizer_path).map_err(Error::msg)
+        Api::new()?
+            .model(repo.to_string())
+            .get(filename)
+            .await
+            .map_err(Error::msg)
     }
 
     async fn model(&self) -> Result<PathBuf> {
@@ -180,7 +187,7 @@ impl Args {
 
             if !output.status.success() {
                 let error = String::from_utf8_lossy(&output.stderr);
-                return Err(Error::msg(format!("gguf-utils merge failed: {}", error)));
+                bail!("llama-gguf-split failed: {}", error)
             }
 
             let merged_path = output_dir.join(filename);
@@ -199,7 +206,7 @@ impl Default for Args {
             top_p: None,
             top_k: None,
             seed: 299792458,
-            cpu: false,
+            device: candle_examples::device(false).unwrap(),
             repeat_penalty: 1.1,
             repeat_last_n: 64,
             which: Which::W25_7b,
@@ -207,8 +214,7 @@ impl Default for Args {
     }
 }
 
-async fn setup_model(args: &Args) -> Result<(ModelWeights, candle::Device)> {
-    let device = candle_examples::device(args.cpu)?;
+async fn setup_model(args: &Args) -> Result<ModelWeights> {
     let model_path = args.model().await?;
     let mut file = std::fs::File::open(&model_path)?;
     let start = std::time::Instant::now();
@@ -222,21 +228,21 @@ async fn setup_model(args: &Args) -> Result<(ModelWeights, candle::Device)> {
             total_size_in_bytes +=
                 elem_count * tensor.ggml_dtype.type_size() / tensor.ggml_dtype.block_size();
         }
-        println!(
+        info!(
             "loaded {:?} tensors ({}) in {:.2}s",
             model.tensor_infos.len(),
             &format_size(total_size_in_bytes),
             start.elapsed().as_secs_f32(),
         );
-        ModelWeights::from_gguf(model, &mut file, &device)?
+        ModelWeights::from_gguf(model, &mut file, &args.device)?
     };
 
-    Ok((model, device))
+    Ok(model)
 }
 
-async fn setup_tokenizer(args: &Args) -> Result<TokenOutputStream> {
-    let tokenizer = args.tokenizer().await?;
-    Ok(TokenOutputStream::new(tokenizer))
+async fn setup_tokenizer(args: &Args) -> Result<Tokenizer> {
+    let pth = args.tokenizer().await?;
+    Tokenizer::from_file(pth).map_err(Error::msg)
 }
 
 fn setup_logits_processor(args: &Args) -> LogitsProcessor {
@@ -296,7 +302,7 @@ fn gen_next_token(
     ctx_tokens: &[u32],
     idx_pos: usize,
     model: &mut ModelWeights,
-    device: &candle::Device,
+    device: &Device,
     logits_processor: &mut LogitsProcessor,
     ans_start_idx: Option<usize>,
     repeat_penalty: Option<f32>,
@@ -325,13 +331,101 @@ fn gen_next_token(
     logits_processor.sample(&logits).map_err(Error::msg)
 }
 
+// 一次对话
+pub struct TextGeneration {
+    model: ModelWeights,
+    tokenizer: Tokenizer,
+    logits_processor: LogitsProcessor,
+    args: Args,
+    ctx_tokens: Vec<u32>,
+    eos_token: u32,
+}
+
+impl TextGeneration {
+    pub async fn new(args: Args) -> Result<Self> {
+        let tokenizer = setup_tokenizer(&args).await?;
+        let eos_token = *tokenizer.get_vocab(true).get("<|im_end|>").unwrap();
+
+        Ok(Self {
+            model: setup_model(&args).await?,
+            tokenizer,
+            logits_processor: setup_logits_processor(&args),
+            args,
+            ctx_tokens: Vec::with_capacity(1024),
+            eos_token,
+        })
+    }
+
+    pub fn chat<'a>(&'a mut self, prompt: &'a str) -> impl Stream<Item = Result<String>> + 'a {
+        try_stream! {
+            let prompt_tokens = process_prompt(prompt, &self.tokenizer)?;
+            self.ctx_tokens.extend_from_slice(&prompt_tokens);
+
+            let start = std::time::Instant::now();
+
+            // 生成第一个token
+            let mut next_token = gen_next_token(
+                &self.ctx_tokens,
+                0,
+                &mut self.model,
+                &self.args.device,
+                &mut self.logits_processor,
+                None,
+                None,
+                None,
+            )?;
+            let ans_start_idx = self.ctx_tokens.len();
+            self.ctx_tokens.push(next_token);
+
+            if let Ok(t) = token2str(next_token, &self.tokenizer) {
+                yield t;
+            }
+
+            // 循环生成回答
+            for index in 0..self.args.sample_len.saturating_sub(1) {
+                next_token = gen_next_token(
+                    &self.ctx_tokens,
+                    ans_start_idx + index,
+                    &mut self.model,
+                    &self.args.device,
+                    &mut self.logits_processor,
+                    Some(ans_start_idx),
+                    Some(self.args.repeat_penalty),
+                    Some(self.args.repeat_last_n),
+                )?;
+                self.ctx_tokens.push(next_token);
+
+                if let Ok(t) = token2str(next_token, &self.tokenizer) {
+                    yield t;
+                }
+
+                if next_token == self.eos_token {
+                    break;
+                }
+            }
+
+            // 在生成速度统计前添加换行
+            yield "\n".to_string();
+
+            let dt = start.elapsed();
+            info!( "speed: {:.2} token/s",
+                (self.ctx_tokens.len() - ans_start_idx) as f64 / dt.as_secs_f64(),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle::Tensor;
-    use candle_transformers::utils::apply_repeat_penalty;
+    use candle_examples::token_output_stream::TokenOutputStream;
     use std::env;
-    use tokio::select;
+    use std::io::Write;
+
+    async fn setup_tos(args: &Args) -> Result<TokenOutputStream> {
+        let tokenizer = setup_tokenizer(args).await?;
+        Ok(TokenOutputStream::new(tokenizer))
+    }
 
     // 用tos输出奇怪
     #[tokio::test]
@@ -341,8 +435,8 @@ mod tests {
         println!("{args:?}");
 
         // 初始化模型、分词器和logits处理器
-        let (mut model, device) = setup_model(&args).await?;
-        let mut tos = setup_tokenizer(&args).await?;
+        let mut model = setup_model(&args).await?;
+        let mut tos = setup_tos(&args).await?;
         let mut logits_processor = setup_logits_processor(&args);
 
         // 初始化上下文token列表
@@ -368,7 +462,7 @@ mod tests {
                 &ctx_tokens,
                 0,
                 &mut model,
-                &device,
+                &args.device,
                 &mut logits_processor,
                 None,
                 None,
@@ -387,7 +481,7 @@ mod tests {
                     &ctx_tokens,
                     ans_start_idx + index,
                     &mut model,
-                    &device,
+                    &args.device,
                     &mut logits_processor,
                     Some(ans_start_idx),
                     Some(args.repeat_penalty),
@@ -424,8 +518,8 @@ mod tests {
         println!("{args:?}");
 
         // 初始化模型、分词器和logits处理器
-        let (mut model, device) = setup_model(&args).await?;
-        let tokenizer = args.tokenizer().await?;
+        let mut model = setup_model(&args).await?;
+        let tokenizer = setup_tokenizer(&args).await?;
         let mut logits_processor = setup_logits_processor(&args);
 
         // 初始化上下文token列表
@@ -452,7 +546,7 @@ mod tests {
                 &ctx_tokens,
                 0,
                 &mut model,
-                &device,
+                &args.device,
                 &mut logits_processor,
                 None,
                 None,
@@ -471,7 +565,7 @@ mod tests {
                     &ctx_tokens,
                     ans_start_idx + index,
                     &mut model,
-                    &device,
+                    &args.device,
                     &mut logits_processor,
                     Some(ans_start_idx),
                     Some(args.repeat_penalty),
@@ -503,79 +597,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gen() -> Result<()> {
+    async fn test_chat() -> Result<()> {
+        tracing_subscriber::fmt::init();
+
         env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
         let args = Args::default();
         println!("{args:?}");
 
-        let callback = |t| {
-            print!("{t}");
-            io::stdout().flush().unwrap();
-        };
-
-        // 初始化模型、分词器和logits处理器
-        let (mut model, device) = setup_model(&args).await?;
-        let tokenizer = args.tokenizer().await?;
-        let mut logits_processor = setup_logits_processor(&args);
-
-        // 初始化上下文token列表
-        let mut ctx_tokens = vec![];
-        let eos_token = *tokenizer.get_vocab(true).get("<|im_end|>").unwrap();
-        let to_sample = args.sample_len.saturating_sub(1);
+        let mut text_gen = TextGeneration::new(args).await?;
 
         loop {
             // 获取用户输入
             let prompt_str = get_user_prompt();
 
-            let prompt_tokens = process_prompt(&prompt_str, &tokenizer)?;
-            ctx_tokens.extend_from_slice(&prompt_tokens);
+            // 创建 stream 并 pin 它
+            let stream = text_gen.chat(&prompt_str);
+            pin_mut!(stream); // 使用 pin_mut! 宏来固定 stream
 
-            let start = std::time::Instant::now();
-
-            // 生成第一个token
-            let mut next_token = gen_next_token(
-                &ctx_tokens,
-                0,
-                &mut model,
-                &device,
-                &mut logits_processor,
-                None,
-                None,
-                None,
-            )?;
-            let ans_start_idx = ctx_tokens.len();
-            ctx_tokens.push(next_token);
-            token2str(next_token, &tokenizer).map(callback)?;
-
-            // 循环生成回答
-            for index in 0..to_sample {
-                next_token = gen_next_token(
-                    &ctx_tokens,
-                    ans_start_idx + index,
-                    &mut model,
-                    &device,
-                    &mut logits_processor,
-                    Some(ans_start_idx),
-                    Some(args.repeat_penalty),
-                    Some(args.repeat_last_n),
-                )?;
-                ctx_tokens.push(next_token);
-
-                token2str(next_token, &tokenizer).map(callback)?;
-
-                if next_token == eos_token {
-                    break;
-                }
+            while let Some(Ok(t)) = stream.next().await {
+                print!("{t}");
+                io::stdout().flush()?;
             }
-
-            let dt = start.elapsed();
-            println!(
-                "\n\n生成速度: {:.2} token/s",
-                (ctx_tokens.len() - ans_start_idx) as f64 / dt.as_secs_f64(),
-            );
         }
-
-        env::remove_var("HTTPS_PROXY");
-        Ok(())
     }
 }

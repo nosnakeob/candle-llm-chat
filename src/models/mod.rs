@@ -1,1 +1,1 @@
-mod qwen;
+mod quantized_qwen2;
