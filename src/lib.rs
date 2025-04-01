@@ -18,6 +18,8 @@ use crate::token_output_stream::TokenOutputStream;
 mod token_output_stream;
 mod arg;
 mod utils;
+#[cfg(test)]
+mod tests;
 
 pub struct ChatBot {
     model: Arc<Mutex<ModelWeights>>,
@@ -146,38 +148,81 @@ impl ChatBot {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn t_chatbot_recv() -> Result<()> {
-        tracing_subscriber::fmt::init();
-
-        let mut chatbot = ChatBot::from_default_args().await?;
-
-        let mut input = "hi".to_string();
-        let mut rx = chatbot.chat(input);
-
-        print!("output: ");
-        // 一个一个token接收
-        while let Some(word) = rx.recv().await {
-            print!("{}", word);
-        }
-        println!();
-
-        input = "what can you do?".to_string();
-        rx = chatbot.chat(input);
-
-        print!("output: ");
-        // 一次接收一组, 可能模型来不及生成
-        let cap = 68;
-        let mut buf = Vec::with_capacity(cap);
-        while rx.recv_many(&mut buf, cap).await > 0 {
-            print!("{}", buf.join(""));
-            buf.clear();
-        }
-
-        Ok(())
-    }
-}
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use candle::utils::{with_avx, with_f16c, with_neon, with_simd128};
+//     use candle::{cuda, quantized};
+//     use std::io::Write;
+// 
+//     #[tokio::test]
+//     async fn t_chatbot_recv() -> Result<()> {
+//         tracing_subscriber::fmt::init();
+// 
+//         let mut chatbot = ChatBot::from_default_args().await?;
+// 
+//         let mut input = "hi".to_string();
+//         let mut rx = chatbot.chat(input);
+// 
+//         print!("output: ");
+//         // 一个一个token接收
+//         while let Some(word) = rx.recv().await {
+//             print!("{}", word);
+//         }
+//         println!();
+// 
+//         input = "what can you do?".to_string();
+//         rx = chatbot.chat(input);
+// 
+//         print!("output: ");
+//         // 一次接收一组, 可能模型来不及生成
+//         let cap = 68;
+//         let mut buf = Vec::with_capacity(cap);
+//         while rx.recv_many(&mut buf, cap).await > 0 {
+//             print!("{}", buf.join(""));
+//             buf.clear();
+//         }
+// 
+//         Ok(())
+//     }
+// 
+//     #[tokio::test]
+//     async fn t_chatbot() -> Result<()> {
+//         quantized::cuda::set_force_dmmv(false);
+// 
+//         cuda::set_gemm_reduced_precision_f16(true);
+//         cuda::set_gemm_reduced_precision_bf16(true);
+// 
+//         info!(
+//             "avx: {}, neon: {}, simd128: {}, f16c: {}",
+//             with_avx(),
+//             with_neon(),
+//             with_simd128(),
+//             with_f16c()
+//         );
+// 
+//         let mut bot = ChatBot::from_default_args().await?;
+// 
+//         // loop {
+//         for _ in 0..3 {
+//             print!("> ");
+//             // 把缓冲区字符串刷到控制台上
+//             std::io::stdout().flush()?;
+//             let mut prompt = String::new();
+//             std::io::stdin().read_line(&mut prompt)?;
+// 
+//             print!("bot: ");
+// 
+//             let mut rx = bot.chat(prompt);
+// 
+//             while let Some(word) = rx.recv().await {
+//                 print!("{word}");
+//                 std::io::stdout().flush()?;
+//             }
+// 
+//             println!();
+//         }
+// 
+//         Ok(())
+//     }
+// }
