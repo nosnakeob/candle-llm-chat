@@ -3,7 +3,8 @@ name = "openchat_bot"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lints.rust]
+unused = "allow"
 
 [dependencies]
 anyhow = "1"
@@ -12,6 +13,7 @@ intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"] }
 
 candle = { package = "candle-core", version = "0.8", features = ["cuda"] }
 candle-transformers = { version = "0.8", features = ["cuda"] }
+candle-nn = { version = "0.8", features = ["cuda"] }
 candle-examples = "0.8"
 
 hf-hub = { version = "0.4", features = ["tokio"] }

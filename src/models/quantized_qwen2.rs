@@ -21,7 +21,6 @@ use candle_transformers::models::quantized_qwen2::ModelWeights;
 use candle_transformers::utils::apply_repeat_penalty;
 use hf_hub::{Cache, Repo};
 
-#[allow(unused)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Which {
     // gpu推理报错
