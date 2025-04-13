@@ -1,22 +1,18 @@
-use crate::utils::{get_user_prompt, setup_logits_processor};
-use candle_examples::token_output_stream::TokenOutputStream;
-use futures_util::{pin_mut, StreamExt};
-use std::io::Write;
-use std::{env, io};
-use anyhow::Error;
+use crate::models::quantized_qwen2::{fmt_prompt, token2str, Config, TextGeneration};
+use crate::utils::get_user_prompt;
+use crate::utils::load::load_logits_processor;
+use anyhow::{Error, Result};
 use candle::Tensor;
+use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::models::quantized_qwen2::ModelWeights;
 use candle_transformers::utils::apply_repeat_penalty;
+use futures_util::{pin_mut, StreamExt};
+use std::io::Write;
+use std::{env, io};
 use tokenizers::Tokenizer;
-use crate::models::quantized_qwen2::{Args, setup_tokenizer, fmt_prompt, setup_model, token2str, TextGeneration};
 
-async fn setup_tos(args: &Args) -> anyhow::Result<TokenOutputStream> {
-    let tokenizer = setup_tokenizer(args).await?;
-    Ok(TokenOutputStream::new(tokenizer))
-}
-
-fn process_prompt(prompt: &str, tokenizer: &Tokenizer) -> anyhow::Result<Vec<u32>> {
+fn process_prompt(prompt: &str, tokenizer: &Tokenizer) -> Result<Vec<u32>> {
     // 格式化提示词
     let prompt = fmt_prompt(&prompt);
 
@@ -32,24 +28,23 @@ fn gen_next_token(
     idx_pos: usize,
     model: &mut ModelWeights,
     logits_processor: &mut LogitsProcessor,
-    args: &Args,
+    config: &Config,
     ans_start_idx: Option<usize>,
-) -> anyhow::Result<u32> {
+) -> Result<u32> {
     let logits = if let Some(ans_start_idx) = ans_start_idx {
-        let input = Tensor::new(&[*ctx_tokens.last().unwrap()], &args.device)?.unsqueeze(0)?;
+        let input = Tensor::new(&[*ctx_tokens.last().unwrap()], &config.device)?.unsqueeze(0)?;
         let mut logits = model.forward(&input, idx_pos)?;
         logits = logits.squeeze(0)?;
 
-        if args.repeat_penalty != 1. {
+        if config.repeat_penalty != 1. {
             let ans_tokens = &ctx_tokens[ans_start_idx..];
-            let start_at = ans_tokens.len().saturating_sub(args.repeat_last_n);
-            logits =
-                apply_repeat_penalty(&logits, args.repeat_penalty, &ans_tokens[start_at..])?
+            let start_at = ans_tokens.len().saturating_sub(config.repeat_last_n);
+            logits = apply_repeat_penalty(&logits, config.repeat_penalty, &ans_tokens[start_at..])?
         };
 
         logits
     } else {
-        let input = Tensor::new(ctx_tokens, &args.device)?.unsqueeze(0)?;
+        let input = Tensor::new(ctx_tokens, &config.device)?.unsqueeze(0)?;
         let logits = model.forward(&input, idx_pos)?;
         logits.squeeze(0)?
     };
@@ -57,23 +52,23 @@ fn gen_next_token(
     logits_processor.sample(&logits).map_err(Error::msg)
 }
 
-// 用tos输出奇怪
+// 用tos多轮输出奇怪
 #[tokio::test]
-async fn test_prompt() -> anyhow::Result<()> {
+async fn test_prompt() -> Result<()> {
     env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
-    let args = Args::default();
-    println!("{args:?}");
+    let config = Config::default();
+    println!("{config:?}");
 
     // 初始化模型、分词器和logits处理器
-    let mut model = setup_model(&args).await?;
-    let mut tos = setup_tos(&args).await?;
+    let mut model = config.setup_model().await?;
+    let mut tos = TokenOutputStream::new(config.setup_tokenizer().await?);
     let mut logits_processor =
-        setup_logits_processor(args.temperature, args.seed, args.top_k, args.top_p);
+        load_logits_processor(config.temperature, config.seed, config.top_k, config.top_p);
 
     // 初始化上下文token列表
     let mut ctx_tokens = vec![];
     let eos_token = *tos.tokenizer().get_vocab(true).get("<|im_end|>").unwrap();
-    let to_sample = args.sample_len.saturating_sub(1);
+    let to_sample = config.sample_len.saturating_sub(1);
 
     let prompts = vec![
         "我是snake，你给我记住了",
@@ -94,7 +89,7 @@ async fn test_prompt() -> anyhow::Result<()> {
             0,
             &mut model,
             &mut logits_processor,
-            &args,
+            &config,
             None,
         )?;
         let ans_start_idx = ctx_tokens.len();
@@ -111,7 +106,7 @@ async fn test_prompt() -> anyhow::Result<()> {
                 ans_start_idx + index,
                 &mut model,
                 &mut logits_processor,
-                &args,
+                &config,
                 Some(ans_start_idx),
             )?;
             ctx_tokens.push(next_token);
@@ -139,21 +134,21 @@ async fn test_prompt() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_prompt_wo_tos() -> anyhow::Result<()> {
+async fn test_prompt_wo_tos() -> Result<()> {
     env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
-    let args = Args::default();
-    println!("{args:?}");
+    let config = Config::default();
+    println!("{config:?}");
 
     // 初始化模型、分词器和logits处理器
-    let mut model = setup_model(&args).await?;
-    let tokenizer = setup_tokenizer(&args).await?;
+    let mut model = config.setup_model().await?;
+    let tokenizer = config.setup_tokenizer().await?;
     let mut logits_processor =
-        setup_logits_processor(args.temperature, args.seed, args.top_k, args.top_p);
+        load_logits_processor(config.temperature, config.seed, config.top_k, config.top_p);
 
     // 初始化上下文token列表
     let mut ctx_tokens = vec![];
     let eos_token = *tokenizer.get_vocab(true).get("<|im_end|>").unwrap();
-    let to_sample = args.sample_len.saturating_sub(1);
+    let to_sample = config.sample_len.saturating_sub(1);
 
     let prompts = vec![
         "我是snake，你给我记住了",
@@ -175,7 +170,7 @@ async fn test_prompt_wo_tos() -> anyhow::Result<()> {
             0,
             &mut model,
             &mut logits_processor,
-            &args,
+            &config,
             None,
         )?;
         let ans_start_idx = ctx_tokens.len();
@@ -192,7 +187,7 @@ async fn test_prompt_wo_tos() -> anyhow::Result<()> {
                 ans_start_idx + index,
                 &mut model,
                 &mut logits_processor,
-                &args,
+                &config,
                 Some(ans_start_idx),
             )?;
             ctx_tokens.push(next_token);
@@ -221,14 +216,14 @@ async fn test_prompt_wo_tos() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_chat() -> anyhow::Result<()> {
+async fn test_chat() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
-    let args = Args::default();
-    println!("{args:?}");
+    let config = Config::default();
+    println!("{config:?}");
 
-    let mut text_gen = TextGeneration::new(args).await?;
+    let mut text_gen = TextGeneration::new(config).await?;
 
     loop {
         // 获取用户输入

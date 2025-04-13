@@ -13,13 +13,14 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 
 use crate::arg::Args;
-use crate::token_output_stream::TokenOutputStream;
+use candle_examples::token_output_stream::TokenOutputStream;
+use candle_transformers::generation::LogitsProcessor;
 
-mod token_output_stream;
 mod arg;
-mod utils;
+mod models;
 #[cfg(test)]
 mod tests;
+mod utils;
 
 pub struct ChatBot {
     model: Arc<Mutex<ModelWeights>>,

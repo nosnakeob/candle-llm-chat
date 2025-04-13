@@ -1,25 +1,16 @@
 extern crate intel_mkl_src;
 
-use crate::utils::{format_size, setup_logits_processor};
-use std::path::PathBuf;
-use std::process::Command;
-
+use crate::models::BaseConfig;
+use crate::utils::load::{load_gguf, load_logits_processor, load_tokenizer};
+use anyhow::{Error, Result};
 use async_stream::try_stream;
-
-use futures_core::stream::Stream;
-
-use tokenizers::Tokenizer;
-
-use hf_hub::api::tokio::Api;
-
-use anyhow::{bail, Error, Result};
-use candle::quantized::gguf_file;
-use candle::{Device, Tensor};
+use candle::Tensor;
 use candle_transformers::generation::LogitsProcessor;
-
 use candle_transformers::models::quantized_qwen2::ModelWeights;
 use candle_transformers::utils::apply_repeat_penalty;
-use hf_hub::{Cache, Repo};
+use futures_core::stream::Stream;
+use std::ops::Deref;
+use tokenizers::Tokenizer;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Which {
@@ -36,209 +27,90 @@ pub enum Which {
 }
 
 impl Which {
-    // 返回tokenizer, model repo, filename
-    pub fn info(&self) -> (&'static str, &'static str, &'static str, &'static str) {
-        let tokenizer_fname = "tokenizer.json";
+    pub fn model(&self) -> (&'static str, &'static str) {
         match self {
-            Which::W2_0_5b => (
-                "Qwen/Qwen2-0.5B-Instruct",
-                tokenizer_fname,
-                "Qwen/Qwen2-0.5B-Instruct-GGUF",
-                "qwen2-0_5b-instruct-q4_0.gguf",
-            ),
-            Which::W2_1_5b => (
-                "Qwen/Qwen2-1.5B-Instruct",
-                tokenizer_fname,
-                "Qwen/Qwen2-1.5B-Instruct-GGUF",
-                "qwen2-1_5b-instruct-q4_0.gguf",
-            ),
-            Which::W2_7b => (
-                "Qwen/Qwen2-7B-Instruct",
-                tokenizer_fname,
-                "Qwen/Qwen2-7B-Instruct-GGUF",
-                "qwen2-7b-instruct-q4_0.gguf",
-            ),
-            Which::W2_72b => (
-                "Qwen/Qwen2-72B-Instruct",
-                tokenizer_fname,
-                "Qwen/Qwen2-72B-Instruct-GGUF",
-                "qwen2-72b-instruct-q4_0.gguf",
-            ),
+            Which::W2_0_5b => ("Qwen/Qwen2-0.5B-Instruct-GGUF", "qwen2-0_5b-instruct-q4_0"),
+            Which::W2_1_5b => ("Qwen/Qwen2-1.5B-Instruct-GGUF", "qwen2-1_5b-instruct-q4_0"),
+            Which::W2_7b => ("Qwen/Qwen2-7B-Instruct-GGUF", "qwen2-7b-instruct-q4_0"),
+            Which::W2_72b => ("Qwen/Qwen2-72B-Instruct-GGUF", "qwen2-72b-instruct-q4_0"),
             Which::W25_0_5b => (
-                "Qwen/Qwen2.5-0.5B-Instruct",
-                tokenizer_fname,
                 "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-                "qwen2.5-0.5b-instruct-q4_0.gguf",
+                "qwen2.5-0.5b-instruct-q4_0",
             ),
             Which::W25_1_5b => (
-                "Qwen/Qwen2.5-1.5B-Instruct",
-                tokenizer_fname,
                 "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-                "qwen2.5-1.5b-instruct-q4_0.gguf",
+                "qwen2.5-1_5b-instruct-q4_0",
             ),
-            Which::W25_7b => (
-                "Qwen/Qwen2.5-7B-Instruct",
-                tokenizer_fname,
-                "Qwen/Qwen2.5-7B-Instruct-GGUF",
-                "qwen2.5-7b-instruct-q4_0.gguf",
-            ),
+            Which::W25_7b => ("Qwen/Qwen2.5-7B-Instruct-GGUF", "qwen2.5-7b-instruct-q4_0"),
             Which::W25_14b => (
-                "Qwen/Qwen2.5-14B-Instruct",
-                tokenizer_fname,
                 "Qwen/Qwen2.5-14B-Instruct-GGUF",
-                "qwen2.5-14b-instruct-q4_0.gguf",
+                "qwen2.5-14b-instruct-q4_0",
             ),
             Which::W25_32b => (
-                "Qwen/Qwen2.5-32B-Instruct",
-                tokenizer_fname,
                 "Qwen/Qwen2.5-32B-Instruct-GGUF",
-                "qwen2.5-32b-instruct-q4_0.gguf",
+                "qwen2.5-32b-instruct-q4_0",
             ),
         }
+    }
+
+    pub fn tokenizer(&self) -> (&'static str, &'static str) {
+        (
+            match self {
+                Which::W2_0_5b => "Qwen/Qwen2-0.5B-Instruct",
+                Which::W2_1_5b => "Qwen/Qwen2-1.5B-Instruct",
+                Which::W2_7b => "Qwen/Qwen2-7B-Instruct",
+                Which::W2_72b => "Qwen/Qwen2-72B-Instruct",
+                Which::W25_0_5b => "Qwen/Qwen2.5-0.5B-Instruct",
+                Which::W25_1_5b => "Qwen/Qwen2.5-1.5B-Instruct",
+                Which::W25_7b => "Qwen/Qwen2.5-7B-Instruct",
+                Which::W25_14b => "Qwen/Qwen2.5-14B-Instruct",
+                Which::W25_32b => "Qwen/Qwen2.5-32B-Instruct",
+            },
+            "tokenizer.json",
+        )
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct Args {
-    /// The length of the sample to generate (in tokens).
-    pub(crate) sample_len: usize,
-
-    /// The temperature used to generate samples, use 0 for greedy sampling.
-    pub(crate) temperature: f64,
-
-    /// Nucleus sampling probability cutoff.
-    pub(crate) top_p: Option<f64>,
-
-    /// Only sample among the top K samples.
-    pub(crate) top_k: Option<usize>,
-
-    /// The seed to use when generating random samples.
-    pub(crate) seed: u64,
-
-    pub(crate) device: Device,
-
-    /// Penalty to be applied for repeating tokens, 1. means no penalty.
-    pub(crate) repeat_penalty: f32,
-
-    /// The context size to consider for the repeat penalty.
-    pub(crate) repeat_last_n: usize,
+pub struct Config {
+    base: BaseConfig,
 
     /// The model size to use.
-    which: Which,
+    pub(crate) which: Which,
 }
 
-impl Args {
-    pub async fn tokenizer(&self) -> Result<PathBuf> {
-        let (repo, filename, _, _) = self.which.info();
-        Api::new()?
-            .model(repo.to_string())
-            .get(filename)
-            .await
-            .map_err(Error::msg)
+impl Config {
+    pub async fn setup_model(&self) -> Result<ModelWeights> {
+        let (repo, filename) = self.which.model();
+        // 构建模型
+        let (mut file, model) = load_gguf(repo, filename).await?;
+
+        let model = ModelWeights::from_gguf(model, &mut file, &self.device)?;
+
+        Ok(model)
     }
 
-    pub async fn model(&self) -> Result<PathBuf> {
-        let (_, _, repo, filename) = self.which.info();
-
-        let model_path = if let Some(path) = Cache::default()
-            .repo(Repo::model(repo.to_string()))
-            .get(filename)
-        {
-            path
-        } else {
-            let repo = Api::new()?.model(repo.to_string());
-
-            let split_filenames: Vec<String> = repo
-                .info()
-                .await?
-                .siblings
-                .into_iter()
-                .map(|sibling| sibling.rfilename)
-                .filter(|s| s.starts_with(filename.strip_suffix(".gguf").unwrap()))
-                .collect();
-
-            let mut split_paths = vec![];
-            for filename in &split_filenames {
-                split_paths.push(repo.get(filename).await?);
-            }
-
-            // 获取输出目录
-            let output_dir = split_paths[0].parent().unwrap();
-            // println!("{:?}", output_dir);
-
-            let merged_path = output_dir.join(filename);
-
-            // 构建命令
-            let exe_path = which::which("llama-gguf-split")?;
-            let mut command = Command::new(exe_path);
-            command
-                .arg("--merge")
-                .arg(split_paths[0].to_str().unwrap())
-                .arg(merged_path.to_str().unwrap());
-
-            // println!("{:?}", command);
-
-            // 执行命令
-            let output = command.output()?;
-
-            if !output.status.success() {
-                let error = String::from_utf8_lossy(&output.stderr);
-                bail!("llama-gguf-split failed: {}", error)
-            }
-
-            let merged_path = output_dir.join(filename);
-            merged_path
-        };
-
-        Ok(model_path)
+    pub async fn setup_tokenizer(&self) -> Result<Tokenizer> {
+        let (repo, filename) = self.which.tokenizer();
+        load_tokenizer(repo, filename).await
     }
 }
 
-impl Default for Args {
+impl Default for Config {
     fn default() -> Self {
         Self {
-            sample_len: 1000,
-            temperature: 0.8,
-            top_p: None,
-            top_k: None,
-            seed: 299792458,
-            device: candle_examples::device(false).unwrap(),
-            repeat_penalty: 1.1,
-            repeat_last_n: 64,
+            base: BaseConfig::default(),
             which: Which::W25_7b,
         }
     }
 }
 
-pub(crate) async fn setup_model(args: &Args) -> Result<ModelWeights> {
-    let model_path = args.model().await?;
-    let mut file = std::fs::File::open(&model_path)?;
-    let start = std::time::Instant::now();
+impl Deref for Config {
+    type Target = BaseConfig;
 
-    // 构建模型
-    let model = {
-        let model = gguf_file::Content::read(&mut file).map_err(|e| e.with_path(&model_path))?;
-        let mut total_size_in_bytes = 0;
-        for (_, tensor) in model.tensor_infos.iter() {
-            let elem_count = tensor.shape.elem_count();
-            total_size_in_bytes +=
-                elem_count * tensor.ggml_dtype.type_size() / tensor.ggml_dtype.block_size();
-        }
-        info!(
-            "loaded {:?} tensors ({}) in {:.2}s",
-            model.tensor_infos.len(),
-            &format_size(total_size_in_bytes),
-            start.elapsed().as_secs_f32(),
-        );
-        ModelWeights::from_gguf(model, &mut file, &args.device)?
-    };
-
-    Ok(model)
-}
-
-pub(crate) async fn setup_tokenizer(args: &Args) -> Result<Tokenizer> {
-    let pth = args.tokenizer().await?;
-    Tokenizer::from_file(pth).map_err(Error::msg)
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
 }
 
 pub(crate) fn fmt_prompt(prompt: &str) -> String {
@@ -257,26 +129,26 @@ pub struct TextGeneration {
     model: ModelWeights,
     tokenizer: Tokenizer,
     logits_processor: LogitsProcessor,
-    args: Args,
+    config: Config,
     ctx_tokens: Vec<u32>,
     eos_token: u32,
 }
 
 impl TextGeneration {
-    pub async fn new(args: Args) -> Result<Self> {
-        let tokenizer = setup_tokenizer(&args).await?;
+    pub async fn new(config: Config) -> Result<Self> {
+        let tokenizer = config.setup_tokenizer().await?;
         let eos_token = *tokenizer.get_vocab(true).get("<|im_end|>").unwrap();
 
         Ok(Self {
-            model: setup_model(&args).await?,
+            model: config.setup_model().await?,
             tokenizer,
-            logits_processor: setup_logits_processor(
-                args.temperature,
-                args.seed,
-                args.top_k,
-                args.top_p,
+            logits_processor: load_logits_processor(
+                config.temperature,
+                config.seed,
+                config.top_k,
+                config.top_p,
             ),
-            args,
+            config,
             ctx_tokens: Vec::with_capacity(1024),
             eos_token,
         })
@@ -299,7 +171,7 @@ impl TextGeneration {
             }
 
             // 循环生成回答
-            for index in 0..self.args.sample_len.saturating_sub(1) {
+            for index in 0..self.config.sample_len.saturating_sub(1) {
                 next_token = self.gen_next_token(ans_start_idx + index, Some(ans_start_idx))?;
                 self.ctx_tokens.push(next_token);
 
@@ -335,24 +207,24 @@ impl TextGeneration {
 
     fn gen_next_token(&mut self, idx_pos: usize, ans_start_idx: Option<usize>) -> Result<u32> {
         let logits = if let Some(ans_start_idx) = ans_start_idx {
-            let input = Tensor::new(&[*self.ctx_tokens.last().unwrap()], &self.args.device)?
+            let input = Tensor::new(&[*self.ctx_tokens.last().unwrap()], &self.config.device)?
                 .unsqueeze(0)?;
             let mut logits = self.model.forward(&input, idx_pos)?;
             logits = logits.squeeze(0)?;
 
-            if self.args.repeat_penalty != 1. {
+            if self.config.repeat_penalty != 1. {
                 let ans_tokens = &self.ctx_tokens[ans_start_idx..];
-                let start_at = ans_tokens.len().saturating_sub(self.args.repeat_last_n);
+                let start_at = ans_tokens.len().saturating_sub(self.config.repeat_last_n);
                 logits = apply_repeat_penalty(
                     &logits,
-                    self.args.repeat_penalty,
+                    self.config.repeat_penalty,
                     &ans_tokens[start_at..],
                 )?
             };
 
             logits
         } else {
-            let input = Tensor::new(&*self.ctx_tokens, &self.args.device)?.unsqueeze(0)?;
+            let input = Tensor::new(&*self.ctx_tokens, &self.config.device)?.unsqueeze(0)?;
             let logits = self.model.forward(&input, idx_pos)?;
             logits.squeeze(0)?
         };
