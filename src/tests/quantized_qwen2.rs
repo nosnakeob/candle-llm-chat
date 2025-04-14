@@ -1,4 +1,4 @@
-use crate::models::quantized_qwen2::{fmt_prompt, token2str, Config, TextGeneration};
+use crate::models::quantized_qwen2::{fmt_prompt, Config, TextGeneration};
 use crate::utils::get_user_prompt;
 use crate::utils::load::load_logits_processor;
 use anyhow::{Error, Result};
@@ -10,7 +10,7 @@ use candle_transformers::utils::apply_repeat_penalty;
 use futures_util::{pin_mut, StreamExt};
 use std::io::Write;
 use std::{env, io};
-use tokenizers::Tokenizer;
+use tokenizers::{tokenizer, Tokenizer};
 
 fn process_prompt(prompt: &str, tokenizer: &Tokenizer) -> Result<Vec<u32>> {
     // 格式化提示词
@@ -52,6 +52,27 @@ fn gen_next_token(
     logits_processor.sample(&logits).map_err(Error::msg)
 }
 
+#[tokio::test]
+async fn test_tokenizer() -> Result<()> {
+    let tokenizer = Config::default().setup_tokenizer().await?;
+
+    let eos_token = "<|im_end|>";
+    // 单个
+    let id = tokenizer.token_to_id(eos_token).unwrap();
+    // 批量
+    assert_eq!(*tokenizer.get_vocab(true).get(eos_token).unwrap(), id);
+
+    assert_eq!(
+        tokenizer.decode(&[id], true).map_err(Error::msg)?,
+        tokenizer
+            .id_to_token(id)
+            .map(|t| if t == eos_token { String::new() } else { t })
+            .unwrap(),
+    );
+
+    Ok(())
+}
+
 // 用tos多轮输出奇怪
 #[tokio::test]
 async fn test_prompt() -> Result<()> {
@@ -67,7 +88,10 @@ async fn test_prompt() -> Result<()> {
 
     // 初始化上下文token列表
     let mut ctx_tokens = vec![];
-    let eos_token = *tos.tokenizer().get_vocab(true).get("<|im_end|>").unwrap();
+    let eos_token = tos
+        .tokenizer()
+        .token_to_id(config.which.eos_token())
+        .unwrap();
     let to_sample = config.sample_len.saturating_sub(1);
 
     let prompts = vec![
@@ -94,10 +118,9 @@ async fn test_prompt() -> Result<()> {
         )?;
         let ans_start_idx = ctx_tokens.len();
         ctx_tokens.push(next_token);
-        if let Some(t) = tos.next_token(next_token)? {
-            print!("{t}");
-            io::stdout().flush()?;
-        }
+
+        print!("{}", tos.next_token(next_token)?.unwrap());
+        io::stdout().flush()?;
 
         // 循环生成回答
         for index in 0..to_sample {
@@ -111,10 +134,8 @@ async fn test_prompt() -> Result<()> {
             )?;
             ctx_tokens.push(next_token);
 
-            if let Some(t) = tos.next_token(next_token)? {
-                print!("{t}");
-                io::stdout().flush()?;
-            }
+            print!("{}", tos.next_token(next_token)?.unwrap());
+            io::stdout().flush()?;
 
             if next_token == eos_token {
                 break;
@@ -135,6 +156,9 @@ async fn test_prompt() -> Result<()> {
 
 #[tokio::test]
 async fn test_prompt_wo_tos() -> Result<()> {
+    candle::cuda::set_gemm_reduced_precision_f16(true);
+    candle::cuda::set_gemm_reduced_precision_bf16(true);
+
     env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
     let config = Config::default();
     println!("{config:?}");
@@ -147,7 +171,7 @@ async fn test_prompt_wo_tos() -> Result<()> {
 
     // 初始化上下文token列表
     let mut ctx_tokens = vec![];
-    let eos_token = *tokenizer.get_vocab(true).get("<|im_end|>").unwrap();
+    let eos_token = tokenizer.token_to_id(config.which.eos_token()).unwrap();
     let to_sample = config.sample_len.saturating_sub(1);
 
     let prompts = vec![
@@ -175,10 +199,12 @@ async fn test_prompt_wo_tos() -> Result<()> {
         )?;
         let ans_start_idx = ctx_tokens.len();
         ctx_tokens.push(next_token);
-        if let Ok(t) = token2str(next_token, &tokenizer) {
-            print!("{t}");
-            io::stdout().flush()?;
-        }
+
+        print!(
+            "{}",
+            tokenizer.decode(&[next_token], true).map_err(Error::msg)?
+        );
+        io::stdout().flush()?;
 
         // 循环生成回答
         for index in 0..to_sample {
@@ -192,10 +218,11 @@ async fn test_prompt_wo_tos() -> Result<()> {
             )?;
             ctx_tokens.push(next_token);
 
-            if let Ok(t) = token2str(next_token, &tokenizer) {
-                print!("{t}");
-                io::stdout().flush()?;
-            }
+            print!(
+                "{}",
+                tokenizer.decode(&[next_token], true).map_err(Error::msg)?
+            );
+            io::stdout().flush()?;
 
             if next_token == eos_token {
                 break;

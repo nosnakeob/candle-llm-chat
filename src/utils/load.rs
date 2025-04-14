@@ -109,8 +109,8 @@ pub async fn load_gguf(repo: &str, filename: &str) -> Result<(File, Content)> {
     Ok((file, model))
 }
 
-pub async fn load_tokenizer(repo: &str, filename: &str) -> Result<Tokenizer> {
-    let pth = Api::new()?.model(repo.to_string()).get(filename).await?;
+pub async fn load_tokenizer(repo: &str) -> Result<Tokenizer> {
+    let pth = Api::new()?.model(repo.to_string()).get("tokenizer.json").await?;
 
     Tokenizer::from_file(pth).map_err(Error::msg)
 }

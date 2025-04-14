@@ -1,12 +1,13 @@
 #[macro_use]
 extern crate tracing;
+#[macro_use]
+extern crate anyhow;
 
 use std::sync::{Arc, Mutex};
 use std::time;
 
 use anyhow::Result;
-use candle_core::Tensor;
-use candle_transformers::generation::LogitsProcessor;
+use candle::Tensor;
 use candle_transformers::models::quantized_llama::ModelWeights;
 use candle_transformers::utils::apply_repeat_penalty;
 use tokio::sync::mpsc;

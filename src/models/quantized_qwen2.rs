@@ -53,21 +53,22 @@ impl Which {
         }
     }
 
-    pub fn tokenizer(&self) -> (&'static str, &'static str) {
-        (
-            match self {
-                Which::W2_0_5b => "Qwen/Qwen2-0.5B-Instruct",
-                Which::W2_1_5b => "Qwen/Qwen2-1.5B-Instruct",
-                Which::W2_7b => "Qwen/Qwen2-7B-Instruct",
-                Which::W2_72b => "Qwen/Qwen2-72B-Instruct",
-                Which::W25_0_5b => "Qwen/Qwen2.5-0.5B-Instruct",
-                Which::W25_1_5b => "Qwen/Qwen2.5-1.5B-Instruct",
-                Which::W25_7b => "Qwen/Qwen2.5-7B-Instruct",
-                Which::W25_14b => "Qwen/Qwen2.5-14B-Instruct",
-                Which::W25_32b => "Qwen/Qwen2.5-32B-Instruct",
-            },
-            "tokenizer.json",
-        )
+    pub fn tokenizer_repo(&self) -> &'static str {
+        match self {
+            Which::W2_0_5b => "Qwen/Qwen2-0.5B-Instruct",
+            Which::W2_1_5b => "Qwen/Qwen2-1.5B-Instruct",
+            Which::W2_7b => "Qwen/Qwen2-7B-Instruct",
+            Which::W2_72b => "Qwen/Qwen2-72B-Instruct",
+            Which::W25_0_5b => "Qwen/Qwen2.5-0.5B-Instruct",
+            Which::W25_1_5b => "Qwen/Qwen2.5-1.5B-Instruct",
+            Which::W25_7b => "Qwen/Qwen2.5-7B-Instruct",
+            Which::W25_14b => "Qwen/Qwen2.5-14B-Instruct",
+            Which::W25_32b => "Qwen/Qwen2.5-32B-Instruct",
+        }
+    }
+
+    pub fn eos_token(&self) -> &'static str {
+        "<|im_end|>"
     }
 }
 
@@ -82,17 +83,14 @@ pub struct Config {
 impl Config {
     pub async fn setup_model(&self) -> Result<ModelWeights> {
         let (repo, filename) = self.which.model();
-        // 构建模型
         let (mut file, model) = load_gguf(repo, filename).await?;
-
         let model = ModelWeights::from_gguf(model, &mut file, &self.device)?;
 
         Ok(model)
     }
 
     pub async fn setup_tokenizer(&self) -> Result<Tokenizer> {
-        let (repo, filename) = self.which.tokenizer();
-        load_tokenizer(repo, filename).await
+        load_tokenizer(self.which.tokenizer_repo()).await
     }
 }
 
@@ -114,14 +112,7 @@ impl Deref for Config {
 }
 
 pub(crate) fn fmt_prompt(prompt: &str) -> String {
-    format!(
-        "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
-        prompt
-    )
-}
-
-pub(crate) fn token2str(token: u32, tokenizer: &Tokenizer) -> Result<String> {
-    tokenizer.decode(&[token], true).map_err(Error::msg)
+    format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
 }
 
 // 一次对话
@@ -137,7 +128,7 @@ pub struct TextGeneration {
 impl TextGeneration {
     pub async fn new(config: Config) -> Result<Self> {
         let tokenizer = config.setup_tokenizer().await?;
-        let eos_token = *tokenizer.get_vocab(true).get("<|im_end|>").unwrap();
+        let eos_token = tokenizer.token_to_id(config.which.eos_token()).unwrap();
 
         Ok(Self {
             model: config.setup_model().await?,
@@ -166,18 +157,14 @@ impl TextGeneration {
             let ans_start_idx = self.ctx_tokens.len();
             self.ctx_tokens.push(next_token);
 
-            if let Ok(t) = token2str(next_token, &self.tokenizer) {
-                yield t;
-            }
+            yield self.tokenizer.decode(&[next_token], true).map_err(Error::msg)?;
 
             // 循环生成回答
             for index in 0..self.config.sample_len.saturating_sub(1) {
                 next_token = self.gen_next_token(ans_start_idx + index, Some(ans_start_idx))?;
                 self.ctx_tokens.push(next_token);
 
-                if let Ok(t) = token2str(next_token, &self.tokenizer) {
-                    yield t;
-                }
+                yield self.tokenizer.decode(&[next_token], true).map_err(Error::msg)?;
 
                 if next_token == self.eos_token {
                     break;
@@ -188,7 +175,7 @@ impl TextGeneration {
             yield "\n".to_string();
 
             let dt = start.elapsed();
-            info!( "speed: {:.2} token/s",
+            info!("speed: {:.2} token/s",
                 (self.ctx_tokens.len() - ans_start_idx) as f64 / dt.as_secs_f64(),
             );
         }
@@ -206,12 +193,17 @@ impl TextGeneration {
     }
 
     fn gen_next_token(&mut self, idx_pos: usize, ans_start_idx: Option<usize>) -> Result<u32> {
-        let logits = if let Some(ans_start_idx) = ans_start_idx {
-            let input = Tensor::new(&[*self.ctx_tokens.last().unwrap()], &self.config.device)?
-                .unsqueeze(0)?;
-            let mut logits = self.model.forward(&input, idx_pos)?;
-            logits = logits.squeeze(0)?;
+        let input = match ans_start_idx {
+            Some(_) => Tensor::new(&[*self.ctx_tokens.last().unwrap()], &self.config.device)?,
+            // 首个字符
+            None => Tensor::new(&*self.ctx_tokens, &self.config.device)?,
+        }.unsqueeze(0)?;
 
+        // 获取模型输出并压缩维度
+        let mut logits = self.model.forward(&input, idx_pos)?.squeeze(0)?;
+
+        // 非首个字符应用惩罚
+        if let Some(ans_start_idx) = ans_start_idx {
             if self.config.repeat_penalty != 1. {
                 let ans_tokens = &self.ctx_tokens[ans_start_idx..];
                 let start_at = ans_tokens.len().saturating_sub(self.config.repeat_last_n);
@@ -219,16 +211,11 @@ impl TextGeneration {
                     &logits,
                     self.config.repeat_penalty,
                     &ans_tokens[start_at..],
-                )?
-            };
+                )?;
+            }
+        }
 
-            logits
-        } else {
-            let input = Tensor::new(&*self.ctx_tokens, &self.config.device)?.unsqueeze(0)?;
-            let logits = self.model.forward(&input, idx_pos)?;
-            logits.squeeze(0)?
-        };
-
+        // 采样下一个token
         self.logits_processor.sample(&logits).map_err(Error::msg)
     }
 }
