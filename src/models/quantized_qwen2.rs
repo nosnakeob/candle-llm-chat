@@ -1,6 +1,6 @@
 extern crate intel_mkl_src;
 
-use crate::models::BaseConfig;
+use crate::models::{BaseConfig, Setup};
 use crate::utils::load::{load_gguf, load_logits_processor, load_tokenizer};
 use anyhow::{Error, Result};
 use async_stream::try_stream;
@@ -12,7 +12,7 @@ use futures_core::stream::Stream;
 use std::ops::Deref;
 use tokenizers::Tokenizer;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum Which {
     // gpu推理报错
     W2_0_5b,
@@ -21,6 +21,7 @@ pub enum Which {
     W2_72b,
     W25_0_5b,
     W25_1_5b,
+    #[default]
     W25_7b,
     W25_14b,
     W25_32b,
@@ -72,16 +73,10 @@ impl Which {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Config {
-    base: BaseConfig,
+impl Setup for BaseConfig<Which> {
+    type Weight = ModelWeights;
 
-    /// The model size to use.
-    pub(crate) which: Which,
-}
-
-impl Config {
-    pub async fn setup_model(&self) -> Result<ModelWeights> {
+    async fn setup_model(&self) -> Result<Self::Weight> {
         let (repo, filename) = self.which.model();
         let (mut file, model) = load_gguf(repo, filename).await?;
         let model = ModelWeights::from_gguf(model, &mut file, &self.device)?;
@@ -89,25 +84,8 @@ impl Config {
         Ok(model)
     }
 
-    pub async fn setup_tokenizer(&self) -> Result<Tokenizer> {
+    async fn setup_tokenizer(&self) -> Result<Tokenizer> {
         load_tokenizer(self.which.tokenizer_repo()).await
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            base: BaseConfig::default(),
-            which: Which::W25_7b,
-        }
-    }
-}
-
-impl Deref for Config {
-    type Target = BaseConfig;
-
-    fn deref(&self) -> &Self::Target {
-        &self.base
     }
 }
 
@@ -120,13 +98,13 @@ pub struct TextGeneration {
     model: ModelWeights,
     tokenizer: Tokenizer,
     logits_processor: LogitsProcessor,
-    config: Config,
+    config: BaseConfig<Which>,
     ctx_tokens: Vec<u32>,
     eos_token: u32,
 }
 
 impl TextGeneration {
-    pub async fn new(config: Config) -> Result<Self> {
+    pub async fn new(config: BaseConfig<Which>) -> Result<Self> {
         let tokenizer = config.setup_tokenizer().await?;
         let eos_token = tokenizer.token_to_id(config.which.eos_token()).unwrap();
 
@@ -197,7 +175,8 @@ impl TextGeneration {
             Some(_) => Tensor::new(&[*self.ctx_tokens.last().unwrap()], &self.config.device)?,
             // 首个字符
             None => Tensor::new(&*self.ctx_tokens, &self.config.device)?,
-        }.unsqueeze(0)?;
+        }
+        .unsqueeze(0)?;
 
         // 获取模型输出并压缩维度
         let mut logits = self.model.forward(&input, idx_pos)?.squeeze(0)?;

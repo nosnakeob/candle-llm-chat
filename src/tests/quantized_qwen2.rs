@@ -1,4 +1,5 @@
-use crate::models::quantized_qwen2::{fmt_prompt, Config, TextGeneration};
+use crate::models::quantized_qwen2::{fmt_prompt, TextGeneration, Which};
+use crate::models::{BaseConfig, Setup};
 use crate::utils::get_user_prompt;
 use crate::utils::load::load_logits_processor;
 use anyhow::{Error, Result};
@@ -10,7 +11,7 @@ use candle_transformers::utils::apply_repeat_penalty;
 use futures_util::{pin_mut, StreamExt};
 use std::io::Write;
 use std::{env, io};
-use tokenizers::{tokenizer, Tokenizer};
+use tokenizers::Tokenizer;
 
 fn process_prompt(prompt: &str, tokenizer: &Tokenizer) -> Result<Vec<u32>> {
     // 格式化提示词
@@ -28,33 +29,34 @@ fn gen_next_token(
     idx_pos: usize,
     model: &mut ModelWeights,
     logits_processor: &mut LogitsProcessor,
-    config: &Config,
+    config: &BaseConfig<Which>,
     ans_start_idx: Option<usize>,
 ) -> Result<u32> {
-    let logits = if let Some(ans_start_idx) = ans_start_idx {
-        let input = Tensor::new(&[*ctx_tokens.last().unwrap()], &config.device)?.unsqueeze(0)?;
-        let mut logits = model.forward(&input, idx_pos)?;
-        logits = logits.squeeze(0)?;
+    // 根据是否有答案起始索引选择输入张量
+    let input = match ans_start_idx {
+        Some(_) => Tensor::new(&[*ctx_tokens.last().unwrap()], &config.device)?,
+        None => Tensor::new(ctx_tokens, &config.device)?,
+    };
 
+    // 获取模型输出并压缩维度
+    let mut logits = model.forward(&input.unsqueeze(0)?, idx_pos)?.squeeze(0)?;
+
+    // 如果有答案起始索引且需要重复惩罚，则应用惩罚
+    if let Some(ans_start_idx) = ans_start_idx {
         if config.repeat_penalty != 1. {
             let ans_tokens = &ctx_tokens[ans_start_idx..];
             let start_at = ans_tokens.len().saturating_sub(config.repeat_last_n);
-            logits = apply_repeat_penalty(&logits, config.repeat_penalty, &ans_tokens[start_at..])?
-        };
+            logits = apply_repeat_penalty(&logits, config.repeat_penalty, &ans_tokens[start_at..])?;
+        }
+    }
 
-        logits
-    } else {
-        let input = Tensor::new(ctx_tokens, &config.device)?.unsqueeze(0)?;
-        let logits = model.forward(&input, idx_pos)?;
-        logits.squeeze(0)?
-    };
-
+    // 采样下一个token
     logits_processor.sample(&logits).map_err(Error::msg)
 }
 
 #[tokio::test]
 async fn test_tokenizer() -> Result<()> {
-    let tokenizer = Config::default().setup_tokenizer().await?;
+    let tokenizer = BaseConfig::<Which>::default().setup_tokenizer().await?;
 
     let eos_token = "<|im_end|>";
     // 单个
@@ -76,8 +78,10 @@ async fn test_tokenizer() -> Result<()> {
 // 用tos多轮输出奇怪
 #[tokio::test]
 async fn test_prompt() -> Result<()> {
-    env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
-    let config = Config::default();
+    unsafe {
+        env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
+    }
+    let config = BaseConfig::<Which>::default();
     println!("{config:?}");
 
     // 初始化模型、分词器和logits处理器
@@ -150,7 +154,9 @@ async fn test_prompt() -> Result<()> {
         );
     }
 
-    env::remove_var("HTTPS_PROXY");
+    unsafe {
+        env::remove_var("HTTPS_PROXY");
+    }
     Ok(())
 }
 
@@ -158,9 +164,11 @@ async fn test_prompt() -> Result<()> {
 async fn test_prompt_wo_tos() -> Result<()> {
     candle::cuda::set_gemm_reduced_precision_f16(true);
     candle::cuda::set_gemm_reduced_precision_bf16(true);
+    unsafe {
+        env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
+    }
 
-    env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
-    let config = Config::default();
+    let config = BaseConfig::<Which>::default();
     println!("{config:?}");
 
     // 初始化模型、分词器和logits处理器
@@ -238,7 +246,9 @@ async fn test_prompt_wo_tos() -> Result<()> {
         );
     }
 
-    env::remove_var("HTTPS_PROXY");
+    unsafe {
+        env::remove_var("HTTPS_PROXY");
+    }
     Ok(())
 }
 
@@ -246,8 +256,10 @@ async fn test_prompt_wo_tos() -> Result<()> {
 async fn test_chat() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
-    let config = Config::default();
+    unsafe {
+        env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
+    }
+    let config = BaseConfig::default();
     println!("{config:?}");
 
     let mut text_gen = TextGeneration::new(config).await?;

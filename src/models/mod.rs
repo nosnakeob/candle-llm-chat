@@ -1,9 +1,11 @@
+use anyhow::Result;
 use candle::Device;
+use tokenizers::Tokenizer;
 
 pub mod quantized_qwen2;
 
 #[derive(Debug, Clone)]
-pub struct BaseConfig {
+pub struct BaseConfig<W: Default> {
     /// The length of the sample to generate (in tokens).
     pub(crate) sample_len: usize,
 
@@ -26,9 +28,12 @@ pub struct BaseConfig {
 
     /// The context size to consider for the repeat penalty.
     pub(crate) repeat_last_n: usize,
+
+    /// The model size to use.
+    pub(crate) which: W,
 }
 
-impl Default for BaseConfig {
+impl<W: Default> Default for BaseConfig<W> {
     fn default() -> Self {
         Self {
             sample_len: 1000,
@@ -39,6 +44,15 @@ impl Default for BaseConfig {
             device: candle_examples::device(false).unwrap(),
             repeat_penalty: 1.1,
             repeat_last_n: 64,
+            which: W::default(),
         }
     }
+}
+
+pub trait Setup {
+    type Weight;
+
+    async fn setup_model(&self) -> Result<Self::Weight>;
+
+    async fn setup_tokenizer(&self) -> Result<Tokenizer>;
 }
