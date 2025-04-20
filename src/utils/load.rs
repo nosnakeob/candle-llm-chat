@@ -1,13 +1,13 @@
-use std::{fs::File, path::PathBuf, process::Command};
-
-use anyhow::{Error, Ok, Result};
+use crate::utils::format_size;
+use anyhow::{Error, Result};
 use candle::quantized::gguf_file::Content;
 use candle_transformers::generation::{LogitsProcessor, Sampling};
+use config;
 use futures_util::future::try_join_all;
+use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{api::tokio::Api, Cache, Repo};
+use std::{fs::File, path::PathBuf, process::Command};
 use tokenizers::Tokenizer;
-
-use crate::utils::format_size;
 
 pub fn load_logits_processor(
     temperature: f64,
@@ -110,7 +110,17 @@ pub async fn load_gguf(repo: &str, filename: &str) -> Result<(File, Content)> {
 }
 
 pub async fn load_tokenizer(repo: &str) -> Result<Tokenizer> {
-    let pth = Api::new()?.model(repo.to_string()).get("tokenizer.json").await?;
+    let config = config::Config::builder()
+        .add_source(config::File::with_name("config.toml"))
+        .build()?;
+    let token = config.get_string("huggingface.token")?;
+
+    let pth = ApiBuilder::new()
+        .with_token(Some(token))
+        .build()?
+        .model(repo.to_string())
+        .get("tokenizer.json")
+        .await?;
 
     Tokenizer::from_file(pth).map_err(Error::msg)
 }

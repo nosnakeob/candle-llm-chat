@@ -30,4 +30,5 @@ which = "7"
 
 enum-assoc = "1.2"
 
+config = "0.15"
 
