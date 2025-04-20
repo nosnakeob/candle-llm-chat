@@ -13,7 +13,6 @@ intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"] }
 
 candle = { package = "candle-core", version = "0.8", features = ["cuda"] }
 candle-transformers = { version = "0.8", features = ["cuda"] }
-candle-nn = { version = "0.8", features = ["cuda"] }
 candle-examples = "0.8"
 
 hf-hub = { version = "0.4", features = ["tokio"] }
@@ -28,5 +27,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 which = "7"
+
+enum-assoc = "1.2"
 
 

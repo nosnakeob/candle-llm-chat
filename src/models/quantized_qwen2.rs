@@ -8,68 +8,61 @@ use candle::Tensor;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::models::quantized_qwen2::ModelWeights;
 use candle_transformers::utils::apply_repeat_penalty;
+use enum_assoc::Assoc;
 use futures_core::stream::Stream;
 use std::ops::Deref;
 use tokenizers::Tokenizer;
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Assoc, Clone, Debug, PartialEq, Eq, Default)]
+#[func(pub fn model(&self) -> (&'static str, &'static str))]
+#[func(pub fn tokenizer_repo(&self) -> &'static str)]
 pub enum Which {
     // gpu推理报错
+    #[assoc(model = ("Qwen/Qwen2-0.5B-Instruct-GGUF", "qwen2-0_5b-instruct-q4_0"))]
+    #[assoc(tokenizer_repo = "Qwen/Qwen2-0.5B-Instruct")]
     W2_0_5b,
+
+    #[assoc(model = ("Qwen/Qwen2-1.5B-Instruct-GGUF", "qwen2-1_5b-instruct-q4_0"))]
+    #[assoc(tokenizer_repo = "Qwen/Qwen2-1.5B-Instruct")]
     W2_1_5b,
+
+    #[assoc(model = ("Qwen/Qwen2-7B-Instruct-GGUF", "qwen2-7b-instruct-q4_0"))]
+    #[assoc(tokenizer_repo = "Qwen/Qwen2-7B-Instruct")]
     W2_7b,
+
+    #[assoc(model = ("Qwen/Qwen2-72B-Instruct-GGUF", "qwen2-72b-instruct-q4_0"))]
+    #[assoc(tokenizer_repo = "Qwen/Qwen2-72B-Instruct")]
     W2_72b,
+
+    #[assoc(model = ("Qwen/Qwen2.5-0.5B-Instruct-GGUF", "qwen2.5-0.5b-instruct-q4_0"))]
+    #[assoc(tokenizer_repo = "Qwen/Qwen2.5-0.5B-Instruct")]
     W25_0_5b,
+
+    #[assoc(model = ("Qwen/Qwen2.5-1.5B-Instruct-GGUF", "qwen2.5-1_5b-instruct-q4_0"))]
+    #[assoc(tokenizer_repo = "Qwen/Qwen2.5-1.5B-Instruct")]
     W25_1_5b,
+
     #[default]
+    #[assoc(model = ("Qwen/Qwen2.5-7B-Instruct-GGUF", "qwen2.5-7b-instruct-q4_0"))]
+    #[assoc(tokenizer_repo = "Qwen/Qwen2.5-7B-Instruct")]
     W25_7b,
+
+    #[assoc(model = ("Qwen/Qwen2.5-14B-Instruct-GGUF", "qwen2.5-14b-instruct-q4_0"))]
+    #[assoc(tokenizer_repo = "Qwen/Qwen2.5-14B-Instruct")]
     W25_14b,
+
+    #[assoc(model = ("Qwen/Qwen2.5-32B-Instruct-GGUF", "qwen2.5-32b-instruct-q4_0"))]
+    #[assoc(tokenizer_repo = "Qwen/Qwen2.5-32B-Instruct")]
     W25_32b,
 }
 
 impl Which {
-    pub fn model(&self) -> (&'static str, &'static str) {
-        match self {
-            Which::W2_0_5b => ("Qwen/Qwen2-0.5B-Instruct-GGUF", "qwen2-0_5b-instruct-q4_0"),
-            Which::W2_1_5b => ("Qwen/Qwen2-1.5B-Instruct-GGUF", "qwen2-1_5b-instruct-q4_0"),
-            Which::W2_7b => ("Qwen/Qwen2-7B-Instruct-GGUF", "qwen2-7b-instruct-q4_0"),
-            Which::W2_72b => ("Qwen/Qwen2-72B-Instruct-GGUF", "qwen2-72b-instruct-q4_0"),
-            Which::W25_0_5b => (
-                "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-                "qwen2.5-0.5b-instruct-q4_0",
-            ),
-            Which::W25_1_5b => (
-                "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-                "qwen2.5-1_5b-instruct-q4_0",
-            ),
-            Which::W25_7b => ("Qwen/Qwen2.5-7B-Instruct-GGUF", "qwen2.5-7b-instruct-q4_0"),
-            Which::W25_14b => (
-                "Qwen/Qwen2.5-14B-Instruct-GGUF",
-                "qwen2.5-14b-instruct-q4_0",
-            ),
-            Which::W25_32b => (
-                "Qwen/Qwen2.5-32B-Instruct-GGUF",
-                "qwen2.5-32b-instruct-q4_0",
-            ),
-        }
-    }
-
-    pub fn tokenizer_repo(&self) -> &'static str {
-        match self {
-            Which::W2_0_5b => "Qwen/Qwen2-0.5B-Instruct",
-            Which::W2_1_5b => "Qwen/Qwen2-1.5B-Instruct",
-            Which::W2_7b => "Qwen/Qwen2-7B-Instruct",
-            Which::W2_72b => "Qwen/Qwen2-72B-Instruct",
-            Which::W25_0_5b => "Qwen/Qwen2.5-0.5B-Instruct",
-            Which::W25_1_5b => "Qwen/Qwen2.5-1.5B-Instruct",
-            Which::W25_7b => "Qwen/Qwen2.5-7B-Instruct",
-            Which::W25_14b => "Qwen/Qwen2.5-14B-Instruct",
-            Which::W25_32b => "Qwen/Qwen2.5-32B-Instruct",
-        }
-    }
-
     pub fn eos_token(&self) -> &'static str {
         "<|im_end|>"
+    }
+
+    pub fn fmt_prompt(&self, prompt: &str) -> String {
+        format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
     }
 }
 
@@ -87,10 +80,6 @@ impl Setup for BaseConfig<Which> {
     async fn setup_tokenizer(&self) -> Result<Tokenizer> {
         load_tokenizer(self.which.tokenizer_repo()).await
     }
-}
-
-pub(crate) fn fmt_prompt(prompt: &str) -> String {
-    format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
 }
 
 // 一次对话
@@ -161,7 +150,7 @@ impl TextGeneration {
 
     fn process_prompt(&self, prompt: &str) -> Result<Vec<u32>> {
         // 格式化提示词
-        let prompt = fmt_prompt(&prompt);
+        let prompt = self.config.which.fmt_prompt(&prompt);
 
         // 将提示词转换为token
         let tokens = self.tokenizer.encode(prompt, true).map_err(Error::msg)?;

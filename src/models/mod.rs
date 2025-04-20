@@ -5,7 +5,7 @@ use tokenizers::Tokenizer;
 pub mod quantized_qwen2;
 
 #[derive(Debug, Clone)]
-pub struct BaseConfig<W: Default> {
+pub struct BaseConfig<W> {
     /// The length of the sample to generate (in tokens).
     pub(crate) sample_len: usize,
 
@@ -53,6 +53,5 @@ pub trait Setup {
     type Weight;
 
     async fn setup_model(&self) -> Result<Self::Weight>;
-
     async fn setup_tokenizer(&self) -> Result<Tokenizer>;
 }
