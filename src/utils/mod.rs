@@ -1,4 +1,5 @@
 pub mod load;
+pub mod template;
 
 use std::io;
 use std::io::BufRead;
