@@ -24,44 +24,58 @@ fn process_prompt(prompt: &str, which: &Which, tokenizer: &Tokenizer) -> Result<
 #[tokio::test]
 async fn test_tokenizer() -> Result<()> {
     let config = BaseConfig::<Which>::default();
+
     let tokenizer = config.setup_tokenizer().await?;
+    // println!("{:#?}", tokenizer.get_added_vocabulary());
 
+    // token -> id
     let eos_token = config.which.eos_token();
-    // 单个
-    let id = tokenizer.token_to_id(eos_token).unwrap();
-    // 批量
-    assert_eq!(*tokenizer.get_vocab(true).get(eos_token).unwrap(), id);
+    let eos_id = tokenizer.token_to_id(eos_token).unwrap();
 
+    // id -> token
     assert_eq!(
-        tokenizer.decode(&[id], true).map_err(Error::msg)?,
+        tokenizer.decode(&[eos_id], true).map_err(Error::msg)?,
         tokenizer
-            .id_to_token(id)
+            .id_to_token(eos_id)
             .map(|t| if t == eos_token { String::new() } else { t })
             .unwrap(),
     );
 
-    let prompt = config.which.fmt_prompt("我是snake，你给我记住了");
-    println!("{prompt}");
-    
-    let tokens = tokenizer
-        .encode(prompt, true)
-        .map_err(Error::msg)?
-        .get_ids()
-        .to_vec();
-    println!("tokens: {tokens:?}");
-    
-    println!(
-        "1st word: {}",
-        tokenizer.decode(&[tokens[0]], false).map_err(Error::msg)?
-    );
+    let tokens = [
+        103942, 73670, 3837, 112735, 113195, 102936, 101036, 11319, 87752, 99639, 97084, 103358,
+        48443, 144236, 84141, 106, 48738, 198, 144185, 48840, 239, 61138, 198, 144736, 8908, 227,
+        117, 56652, 48738, 198, 144251, 10236, 230, 109, 63109, 198, 136879, 38433, 104, 100979,
+        105626, 198, 144538, 6567, 223, 233, 99242, 101047, 99396, 107261, 198, 144927, 90476, 251,
+        77598, 198, 145048, 4891, 241, 255, 103738, 198, 144848, 68739, 115, 109959, 198, 144656,
+        40666, 100, 48738, 198, 145379, 18137, 248, 122, 38182, 198, 145491, 86009, 101265, 271,
+        102056, 18830, 100398, 104378, 100631, 103945, 108086, 3837, 73670, 106525, 104170, 6313,
+        151645,
+    ];
     println!("{}", tokenizer.decode(&tokens, true).map_err(Error::msg)?);
+    // 单个token-/>字符
+    tokens.iter().for_each(|t| {
+        print!("{}", tokenizer.decode(&[*t], true).unwrap());
+    });
+    println!();
+
+    let mut tos = TokenOutputStream::new(tokenizer);
+    tokens.iter().for_each(|t| {
+        if let Some(t) = tos.next_token(*t).unwrap() {
+            print!("{}", t);
+        }
+    });
+    if let Some(t) = tos.decode_rest()? {
+        print!("{}", t);
+    }
+    println!();
 
     Ok(())
 }
 
-// 用tos多轮输出奇怪
 #[tokio::test]
 async fn test_prompt() -> Result<()> {
+    candle::cuda::set_gemm_reduced_precision_f16(true);
+    candle::cuda::set_gemm_reduced_precision_bf16(true);
     unsafe {
         env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
     }
@@ -107,8 +121,10 @@ async fn test_prompt() -> Result<()> {
         let ans_start_idx = ctx_tokens.len();
         ctx_tokens.push(next_token);
 
-        print!("{}", tos.next_token(next_token)?.unwrap());
-        io::stdout().flush()?;
+        if let Some(t) = tos.next_token(next_token)? {
+            print!("{}", t);
+            io::stdout().flush()?;
+        }
 
         // 循环生成回答
         for index in 0..to_sample {
@@ -122,110 +138,27 @@ async fn test_prompt() -> Result<()> {
             )?;
             ctx_tokens.push(next_token);
 
-            print!("{}", tos.next_token(next_token)?.unwrap());
-            io::stdout().flush()?;
+            if let Some(t) = tos.next_token(next_token)? {
+                print!("{}", t);
+                io::stdout().flush()?;
+            }
 
             if next_token == eos_token {
                 break;
             }
         }
 
-        let dt = start.elapsed();
-
-        println!(
-            "\n\n生成速度: {:.2} token/s",
-            (ctx_tokens.len() - ans_start_idx) as f64 / dt.as_secs_f64(),
-        );
-    }
-
-    unsafe {
-        env::remove_var("HTTPS_PROXY");
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_prompt_wo_tos() -> Result<()> {
-    candle::cuda::set_gemm_reduced_precision_f16(true);
-    candle::cuda::set_gemm_reduced_precision_bf16(true);
-    unsafe {
-        env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
-    }
-
-    let config = BaseConfig::<Which>::default();
-    println!("{config:?}");
-
-    // 初始化模型、分词器和logits处理器
-    let mut model = config.setup_model().await?;
-    let tokenizer = config.setup_tokenizer().await?;
-    let mut logits_processor =
-        load_logits_processor(config.temperature, config.seed, config.top_k, config.top_p);
-
-    // 初始化上下文token列表
-    let mut ctx_tokens = vec![];
-    let eos_token = tokenizer.token_to_id(config.which.eos_token()).unwrap();
-    let to_sample = config.sample_len.saturating_sub(1);
-
-    let prompts = vec![
-        "我是snake，你给我记住了",
-        "还记得我是谁吗",
-        "你是谁",
-        "给我笑一笑",
-    ];
-
-    for prompt_str in prompts {
-        // 将提示词转换为token并添加到上下文
-        let prompt_tokens = process_prompt(&prompt_str, &config.which, &tokenizer)?;
-        ctx_tokens.extend_from_slice(&prompt_tokens);
-
-        let start = std::time::Instant::now();
-
-        // 生成第一个token
-        let mut next_token = gen_next_token(
-            &ctx_tokens,
-            0,
-            ModelWeight::Qwen(&mut model),
-            &mut logits_processor,
-            &config,
-            None,
-        )?;
-        let ans_start_idx = ctx_tokens.len();
-        ctx_tokens.push(next_token);
-
-        print!(
-            "{}",
-            tokenizer.decode(&[next_token], true).map_err(Error::msg)?
-        );
-        io::stdout().flush()?;
-
-        // 循环生成回答
-        for index in 0..to_sample {
-            next_token = gen_next_token(
-                &ctx_tokens,
-                ans_start_idx + index,
-                ModelWeight::Qwen(&mut model),
-                &mut logits_processor,
-                &config,
-                Some(ans_start_idx),
-            )?;
-            ctx_tokens.push(next_token);
-
-            print!(
-                "{}",
-                tokenizer.decode(&[next_token], true).map_err(Error::msg)?
-            );
+        if let Some(t) = tos.decode_rest()? {
+            print!("{}", t);
             io::stdout().flush()?;
-
-            if next_token == eos_token {
-                break;
-            }
         }
 
-        // 将回答添加到上下文
+        tos.clear();
+
         let dt = start.elapsed();
 
         println!(
-            "\n\n生成速度: {:.2} token/s",
+            "\n\nspeed: {:.2} token/s",
             (ctx_tokens.len() - ans_start_idx) as f64 / dt.as_secs_f64(),
         );
     }

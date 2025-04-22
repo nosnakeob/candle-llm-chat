@@ -2,9 +2,11 @@ extern crate intel_mkl_src;
 
 use crate::models::{BaseConfig, Setup};
 use crate::utils::load::{load_gguf, load_logits_processor, load_tokenizer};
+use crate::utils::template::{ChatContext, Message, Role, TemplateType};
 use anyhow::{Error, Result};
 use async_stream::try_stream;
 use candle::Tensor;
+use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::models::quantized_qwen2::ModelWeights;
 use candle_transformers::utils::apply_repeat_penalty;
@@ -85,11 +87,12 @@ impl Setup for BaseConfig<Which> {
 // 一次对话
 pub struct TextGeneration {
     model: ModelWeights,
-    tokenizer: Tokenizer,
+    tos: TokenOutputStream,
     logits_processor: LogitsProcessor,
     config: BaseConfig<Which>,
     ctx_tokens: Vec<u32>,
     eos_token: u32,
+    ctx: ChatContext,
 }
 
 impl TextGeneration {
@@ -99,7 +102,7 @@ impl TextGeneration {
 
         Ok(Self {
             model: config.setup_model().await?,
-            tokenizer,
+            tos: TokenOutputStream::new(tokenizer),
             logits_processor: load_logits_processor(
                 config.temperature,
                 config.seed,
@@ -109,13 +112,19 @@ impl TextGeneration {
             config,
             ctx_tokens: Vec::with_capacity(1024),
             eos_token,
+            ctx: ChatContext::new(TemplateType::Qwen),
         })
     }
 
     pub fn chat<'a>(&'a mut self, prompt: &'a str) -> impl Stream<Item = Result<String>> + 'a {
-        try_stream! {
-            let prompt_tokens = self.process_prompt(prompt)?;
-            self.ctx_tokens.extend_from_slice(&prompt_tokens);
+        let mut answer = String::new();
+        let mut ans_tokens = vec![];
+        self.ctx.push_msg(prompt);
+
+        try_stream!({
+            let prompt = self.ctx.render()?;
+            // println!("prompt: {}", prompt);
+            self.ctx_tokens = self.str2tokens(&prompt)?;
 
             let start = std::time::Instant::now();
 
@@ -123,37 +132,68 @@ impl TextGeneration {
             let mut next_token = self.gen_next_token(0, None)?;
             let ans_start_idx = self.ctx_tokens.len();
             self.ctx_tokens.push(next_token);
+            ans_tokens.push(next_token);
 
-            yield self.tokenizer.decode(&[next_token], true).map_err(Error::msg)?;
+            if let Some(t) = self.tos.next_token(next_token)? {
+                answer.push_str(&t);
+                yield t;
+            }
 
             // 循环生成回答
             for index in 0..self.config.sample_len.saturating_sub(1) {
                 next_token = self.gen_next_token(ans_start_idx + index, Some(ans_start_idx))?;
                 self.ctx_tokens.push(next_token);
+                ans_tokens.push(next_token);
 
-                yield self.tokenizer.decode(&[next_token], true).map_err(Error::msg)?;
+                if let Some(t) = self.tos.next_token(next_token)? {
+                    answer.push_str(&t);
+                    yield t;
+                }
 
                 if next_token == self.eos_token {
                     break;
                 }
             }
 
-            // 在生成速度统计前添加换行
-            yield "\n".to_string();
+            if let Some(t) = self.tos.decode_rest()? {
+                answer.push_str(&t);
+                yield t;
+            }
 
-            let dt = start.elapsed();
-            info!("speed: {:.2} token/s",
-                (self.ctx_tokens.len() - ans_start_idx) as f64 / dt.as_secs_f64(),
+            self.ctx.push_msg(&answer);
+            // println!("{:?}", ans_tokens);
+            self.tos.clear();
+
+            info!(
+                "speed: {:.2} token/s, total tokens: {}",
+                (self.ctx_tokens.len() - ans_start_idx) as f64 / start.elapsed().as_secs_f64(),
+                self.ctx_tokens.len()
             );
-        }
+        })
     }
 
-    fn process_prompt(&self, prompt: &str) -> Result<Vec<u32>> {
-        // 格式化提示词
-        let prompt = self.config.which.fmt_prompt(&prompt);
+    fn process_prompt(&mut self, prompt: &str) -> Result<Vec<u32>> {
+        // 使用ChatContext渲染模板
+        self.ctx.push_msg(prompt);
+        let prompt = self.ctx.render()?;
 
         // 将提示词转换为token
-        let tokens = self.tokenizer.encode(prompt, true).map_err(Error::msg)?;
+        let tokens = self
+            .tos
+            .tokenizer()
+            .encode(prompt, true)
+            .map_err(Error::msg)?;
+        let tokens = tokens.get_ids().to_vec();
+
+        Ok(tokens)
+    }
+
+    fn str2tokens(&mut self, string: &str) -> Result<Vec<u32>> {
+        let tokens = self
+            .tos
+            .tokenizer()
+            .encode(string, true)
+            .map_err(Error::msg)?;
         let tokens = tokens.get_ids().to_vec();
 
         Ok(tokens)
