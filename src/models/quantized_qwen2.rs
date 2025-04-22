@@ -2,7 +2,6 @@ extern crate intel_mkl_src;
 
 use crate::models::{BaseConfig, Setup};
 use crate::utils::load::{load_gguf, load_logits_processor, load_tokenizer};
-use crate::utils::template::{ChatContext, Message, Role, TemplateType};
 use anyhow::{Error, Result};
 use async_stream::try_stream;
 use candle::Tensor;
@@ -13,6 +12,7 @@ use candle_transformers::utils::apply_repeat_penalty;
 use enum_assoc::Assoc;
 use futures_core::stream::Stream;
 use std::ops::Deref;
+use template::{ChatContext, Message, Role, TemplateType};
 use tokenizers::Tokenizer;
 
 #[derive(Assoc, Clone, Debug, PartialEq, Eq, Default)]
@@ -170,22 +170,6 @@ impl TextGeneration {
                 self.ctx_tokens.len()
             );
         })
-    }
-
-    fn process_prompt(&mut self, prompt: &str) -> Result<Vec<u32>> {
-        // 使用ChatContext渲染模板
-        self.ctx.push_msg(prompt);
-        let prompt = self.ctx.render()?;
-
-        // 将提示词转换为token
-        let tokens = self
-            .tos
-            .tokenizer()
-            .encode(prompt, true)
-            .map_err(Error::msg)?;
-        let tokens = tokens.get_ids().to_vec();
-
-        Ok(tokens)
     }
 
     fn str2tokens(&mut self, string: &str) -> Result<Vec<u32>> {

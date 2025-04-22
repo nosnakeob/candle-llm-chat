@@ -8,7 +8,6 @@ use candle_transformers::utils::apply_repeat_penalty;
 use tokenizers::Tokenizer;
 
 mod qwen2;
-mod template;
 
 enum ModelWeight<'a> {
     Qwen(&'a mut quantized_qwen2::ModelWeights),

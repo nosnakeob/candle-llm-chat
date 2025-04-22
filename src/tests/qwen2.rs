@@ -8,14 +8,11 @@ use candle_examples::token_output_stream::TokenOutputStream;
 use futures_util::{pin_mut, StreamExt};
 use std::io::Write;
 use std::{env, io};
+use template::{ChatContext, TemplateType};
 use tokenizers::Tokenizer;
 
-fn process_prompt(prompt: &str, which: &Which, tokenizer: &Tokenizer) -> Result<Vec<u32>> {
-    // 格式化提示词
-    let prompt = which.fmt_prompt(&prompt);
-
-    // 将提示词转换为token
-    let tokens = tokenizer.encode(prompt, true).map_err(Error::msg)?;
+fn str2tokens(string: &str, tokenizer: &Tokenizer) -> Result<Vec<u32>> {
+    let tokens = tokenizer.encode(string, true).map_err(Error::msg)?;
     let tokens = tokens.get_ids().to_vec();
 
     Ok(tokens)
@@ -87,6 +84,7 @@ async fn test_prompt() -> Result<()> {
     let mut tos = TokenOutputStream::new(config.setup_tokenizer().await?);
     let mut logits_processor =
         load_logits_processor(config.temperature, config.seed, config.top_k, config.top_p);
+    let mut ctx = ChatContext::new(TemplateType::Qwen);
 
     // 初始化上下文token列表
     let mut ctx_tokens = vec![];
@@ -102,10 +100,13 @@ async fn test_prompt() -> Result<()> {
         "你是谁",
         "给我笑一笑",
     ];
+    let mut answer = String::new();
 
     for prompt_str in prompts {
-        let prompt_tokens = process_prompt(&prompt_str, &config.which, tos.tokenizer())?;
-        ctx_tokens.extend_from_slice(&prompt_tokens);
+        ctx.push_msg(prompt_str);
+        let prompt = ctx.render()?;
+        // println!("prompt: {}", prompt);
+        ctx_tokens = str2tokens(&prompt, tos.tokenizer())?;
 
         let start = std::time::Instant::now();
 
@@ -123,6 +124,7 @@ async fn test_prompt() -> Result<()> {
 
         if let Some(t) = tos.next_token(next_token)? {
             print!("{}", t);
+            answer.push_str(&t);
             io::stdout().flush()?;
         }
 
@@ -140,6 +142,7 @@ async fn test_prompt() -> Result<()> {
 
             if let Some(t) = tos.next_token(next_token)? {
                 print!("{}", t);
+                answer.push_str(&t);
                 io::stdout().flush()?;
             }
 
@@ -150,10 +153,14 @@ async fn test_prompt() -> Result<()> {
 
         if let Some(t) = tos.decode_rest()? {
             print!("{}", t);
+            answer.push_str(&t);
             io::stdout().flush()?;
         }
 
+        ctx.push_msg(&answer);
+
         tos.clear();
+        answer.clear();
 
         let dt = start.elapsed();
 
