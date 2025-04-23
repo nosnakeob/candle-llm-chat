@@ -8,7 +8,7 @@ use candle_examples::token_output_stream::TokenOutputStream;
 use futures_util::{pin_mut, StreamExt};
 use std::io::Write;
 use std::{env, io};
-use template::{ChatContext, TemplateType};
+use template::ChatContext;
 use tokenizers::Tokenizer;
 
 fn str2tokens(string: &str, tokenizer: &Tokenizer) -> Result<Vec<u32>> {
@@ -84,7 +84,7 @@ async fn test_prompt() -> Result<()> {
     let mut tos = TokenOutputStream::new(config.setup_tokenizer().await?);
     let mut logits_processor =
         load_logits_processor(config.temperature, config.seed, config.top_k, config.top_p);
-    let mut ctx = ChatContext::new(TemplateType::Qwen);
+    let mut ctx = ChatContext::new(config.which.tokenizer_repo()).await?;
 
     // 初始化上下文token列表
     let mut ctx_tokens = vec![];

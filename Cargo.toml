@@ -3,15 +3,19 @@ name = "openchat_bot"
 version = "0.1.0"
 edition = "2021"
 
-[workspace]
-members = ["template"]
-
 [lints.rust]
 unused = "allow"
 
-[dependencies]
-anyhow = "1"
+[workspace]
+members = ["template"]
 
+[workspace.dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+
+
+[dependencies]
+anyhow = { workspace = true }
 intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"] }
 
 candle = { package = "candle-core", version = "0.8", features = ["cuda"] }
@@ -21,7 +25,7 @@ candle-examples = "0.8"
 hf-hub = { version = "0.4", features = ["tokio"] }
 tokenizers = "0.21"
 
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true }
 async-stream = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
@@ -35,4 +39,4 @@ enum-assoc = "1.2"
 
 config = "0.15"
 derive-new = "0.7"
-template = {path = "./template"}
+template = { path = "./template" }

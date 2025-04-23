@@ -3,24 +3,29 @@ extern crate anyhow;
 
 use anyhow::{Error, Result};
 use derive_new::new;
+use hf_hub::api::tokio::Api;
 use minijinja::Environment;
+use parking_lot::RwLock;
 use serde::Serialize;
+use serde_json::Value;
+use std::fs::File;
+use std::io::BufReader;
 use std::sync::LazyLock;
 
-static TEMPLATE_ENV: LazyLock<Environment> = LazyLock::new(|| {
-    let mut env = Environment::new();
-    env.add_template(
-        "qwen_template",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/qwen.jinja")),
-    )
-    .unwrap();
-    env.add_template(
-        "ds_template",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/templates/ds.jinja")),
-    )
-    .unwrap();
-    env
-});
+static TEMPLATE_ENV: LazyLock<RwLock<Environment>> =
+    LazyLock::new(|| RwLock::new(Environment::new()));
+
+async fn load_template(tokenizer_repo: &str) -> Result<Value> {
+    let pth = Api::new()?
+        .model(tokenizer_repo.to_string())
+        .get("tokenizer_config.json")
+        .await?;
+
+    let file = File::open(pth)?;
+    let mut json: Value = serde_json::from_reader(BufReader::new(file))?;
+
+    Ok(json["chat_template"].take())
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -37,27 +42,33 @@ pub struct Message {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChatContext {
     pub messages: Vec<Message>,
     pub add_generation_prompt: bool,
-    #[serde(skip_serializing)]
-    pub template_type: TemplateType,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TemplateType {
-    Qwen,
-    DeepSeek,
+    #[serde(skip_serializing)]
+    pub tokenizer_repo: String,
 }
 
 impl ChatContext {
-    pub fn new(template_type: TemplateType) -> Self {
-        Self {
+    pub async fn new(tokenizer_repo: &str) -> Result<Self> {
+        let tokenizer_repo = tokenizer_repo.to_string();
+
+        if TEMPLATE_ENV.read().get_template(&tokenizer_repo).is_err() {
+            let template = load_template(&tokenizer_repo).await?;
+
+            TEMPLATE_ENV.write().add_template_owned(
+                tokenizer_repo.clone(),
+                template.as_str().unwrap().to_string(),
+            )?;
+        }
+
+        Ok(Self {
             messages: vec![],
             add_generation_prompt: true,
-            template_type,
-        }
+            tokenizer_repo,
+        })
     }
 
     /// 添加消息到对话上下文中  
@@ -81,16 +92,25 @@ impl ChatContext {
 
         let ctx = serde_json::to_value(self)?;
 
-        let template_name = match self.template_type {
-            TemplateType::Qwen => "qwen_template",
-            TemplateType::DeepSeek => "ds_template",
-        };
-        let template = TEMPLATE_ENV.get_template(template_name)?;
-        template.render(&ctx).map_err(Error::msg)
+        TEMPLATE_ENV
+            .read()
+            .get_template(&self.tokenizer_repo)?
+            .render(&ctx)
+            .map_err(Error::msg)
     }
 
-    pub fn set_template_type(&mut self, template_type: TemplateType) {
-        self.template_type = template_type;
+    pub async fn set_tokenizer_repo(&mut self, tokenizer_repo: &str) -> Result<()> {
+        self.tokenizer_repo = tokenizer_repo.to_string();
+
+        if TEMPLATE_ENV.read().get_template(tokenizer_repo).is_err() {
+            let template = load_template(tokenizer_repo).await?;
+            TEMPLATE_ENV.write().add_template_owned(
+                tokenizer_repo.to_string(),
+                template.as_str().unwrap().to_string(),
+            )?;
+        }
+
+        Ok(())
     }
 }
 
@@ -98,16 +118,16 @@ impl ChatContext {
 mod tests {
     use super::*;
 
-    #[test]
-    fn t_push_msg() -> Result<()> {
-        let mut ctx = ChatContext::new(TemplateType::Qwen);
+    #[tokio::test]
+    async fn t_push_msg() -> Result<()> {
+        let mut template = ChatContext::new("Qwen/Qwen2.5-7B-Instruct").await?;
 
-        ctx.push_msg("hello");
-        ctx.push_msg("hi");
-        ctx.push_msg("how are you");
+        template.push_msg("hello");
+        template.push_msg("hi");
+        template.push_msg("how are you");
 
         assert_eq!(
-            ctx.messages,
+            template.messages,
             vec![
                 Message::new(Role::User, "hello"),
                 Message::new(Role::Assistant, "hi"),
@@ -118,31 +138,33 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn t_ctx2prompt() -> Result<()> {
-        let mut ctx = ChatContext::new(TemplateType::Qwen);
+    #[tokio::test]
+    async fn t_ctx2prompt() -> Result<()> {
+        let mut template = ChatContext::new("Qwen/Qwen2.5-7B-Instruct").await?;
 
-        ctx.push_msg("hello");
-        ctx.push_msg("hi");
-        ctx.push_msg("how are you");
+        template.push_msg("hello");
+        template.push_msg("hi");
+        template.push_msg("how are you");
 
         assert_eq!(
-            ctx.render()?,
+            template.render()?,
             "<|im_start|>system\n\
-        You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n\
-        <|im_start|>user\n\
-        hello<|im_end|>\n\
-        <|im_start|>assistant\n\
-        hi<|im_end|>\n\
-        <|im_start|>user\n\
-        how are you<|im_end|>\n\
-        <|im_start|>assistant\n"
+            You are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n\
+            <|im_start|>user\n\
+            hello<|im_end|>\n\
+            <|im_start|>assistant\n\
+            hi<|im_end|>\n\
+            <|im_start|>user\n\
+            how are you<|im_end|>\n\
+            <|im_start|>assistant\n"
         );
-        ctx.set_template_type(TemplateType::DeepSeek);
+        template
+            .set_tokenizer_repo("deepseek-ai/DeepSeek-R1-Distill-Llama-8B")
+            .await?;
         assert_eq!(
-        ctx.render()?,
-        "<｜User｜>hello<｜Assistant｜>hi<｜end▁of▁sentence｜><｜User｜>how are you<｜Assistant｜>"
-    );
+            template.render()?,
+            "<｜User｜>hello<｜Assistant｜>hi<｜end▁of▁sentence｜><｜User｜>how are you<｜Assistant｜><think>\n"
+        );
 
         Ok(())
     }

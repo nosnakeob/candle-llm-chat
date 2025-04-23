@@ -12,7 +12,7 @@ use candle_transformers::utils::apply_repeat_penalty;
 use enum_assoc::Assoc;
 use futures_core::stream::Stream;
 use std::ops::Deref;
-use template::{ChatContext, Message, Role, TemplateType};
+use template::{ChatContext, Message, Role};
 use tokenizers::Tokenizer;
 
 #[derive(Assoc, Clone, Debug, PartialEq, Eq, Default)]
@@ -109,10 +109,10 @@ impl TextGeneration {
                 config.top_k,
                 config.top_p,
             ),
+            ctx: ChatContext::new(config.which.tokenizer_repo()).await?,
             config,
             ctx_tokens: Vec::with_capacity(1024),
             eos_token,
-            ctx: ChatContext::new(TemplateType::Qwen),
         })
     }
 
