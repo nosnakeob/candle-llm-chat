@@ -6,9 +6,9 @@ use crate::utils::load::load_logits_processor;
 use anyhow::{Error, Result};
 use candle_examples::token_output_stream::TokenOutputStream;
 use futures_util::{pin_mut, StreamExt};
+use hf_chat_template::ChatContext;
 use std::io::Write;
 use std::{env, io};
-use template::ChatContext;
 use tokenizers::Tokenizer;
 
 fn str2tokens(string: &str, tokenizer: &Tokenizer) -> Result<Vec<u32>> {

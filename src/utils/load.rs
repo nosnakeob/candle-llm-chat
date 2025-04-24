@@ -38,7 +38,7 @@ pub async fn download_gguf(repo: &str, filename: &str) -> Result<PathBuf> {
     let filename_with_ext = format!("{}.gguf", filename);
 
     if let Some(path) = Cache::default()
-        .repo(Repo::model(repo.to_string()))
+        .model(repo.to_string())
         .get(&filename_with_ext)
     {
         Ok(path)

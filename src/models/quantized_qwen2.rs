@@ -11,8 +11,8 @@ use candle_transformers::models::quantized_qwen2::ModelWeights;
 use candle_transformers::utils::apply_repeat_penalty;
 use enum_assoc::Assoc;
 use futures_core::stream::Stream;
+use hf_chat_template::{ChatContext, Message, Role};
 use std::ops::Deref;
-use template::{ChatContext, Message, Role};
 use tokenizers::Tokenizer;
 
 #[derive(Assoc, Clone, Debug, PartialEq, Eq, Default)]
