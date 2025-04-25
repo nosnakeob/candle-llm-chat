@@ -31,4 +31,4 @@ enum-assoc = "1.2"
 
 config = "0.15"
 derive-new = "0.7"
-hf-chat-template = { git = "https://github.com/nosnakeob/hf-chat-template.git" }
+hf-chat-template = { version = "0.3", git = "https://github.com/nosnakeob/hf-chat-template.git" }

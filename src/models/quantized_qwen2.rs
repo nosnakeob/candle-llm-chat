@@ -56,15 +56,18 @@ pub enum Which {
     #[assoc(model = ("Qwen/Qwen2.5-32B-Instruct-GGUF", "qwen2.5-32b-instruct-q4_0"))]
     #[assoc(tokenizer_repo = "Qwen/Qwen2.5-32B-Instruct")]
     W25_32b,
+
+    #[assoc(model = ("unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF", "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M"))]
+    #[assoc(tokenizer_repo = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")]
+    DeepseekR1Qwen7B,
 }
 
 impl Which {
     pub fn eos_token(&self) -> &'static str {
-        "<|im_end|>"
-    }
-
-    pub fn fmt_prompt(&self, prompt: &str) -> String {
-        format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
+        match self {
+            Which::DeepseekR1Qwen7B => "<｜end▁of▁sentence｜>",
+            _ => "<|im_end|>",
+        }
     }
 }
 

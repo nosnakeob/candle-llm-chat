@@ -21,13 +21,14 @@ fn str2tokens(string: &str, tokenizer: &Tokenizer) -> Result<Vec<u32>> {
 #[tokio::test]
 async fn test_tokenizer() -> Result<()> {
     let config = BaseConfig::<Which>::default();
+    println!("{:?}", config.which);
 
     let tokenizer = config.setup_tokenizer().await?;
     // println!("{:#?}", tokenizer.get_added_vocabulary());
 
     // token -> id
     let eos_token = config.which.eos_token();
-    let eos_id = tokenizer.token_to_id(eos_token).unwrap();
+    let eos_id = tokenizer.token_to_id(&eos_token).unwrap();
 
     // id -> token
     assert_eq!(
