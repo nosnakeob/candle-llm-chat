@@ -1,42 +1,31 @@
-use crate::models::quantized_qwen2::{TextGeneration, Which};
-use crate::models::{BaseConfig, Setup};
-use crate::tests::{gen_next_token, ModelWeight};
-use crate::utils::get_user_prompt;
+use crate::config::BaseConfig;
+use crate::models::q_qwen2::Which;
+use crate::models::HubInfo;
+use crate::tests::{gen_next_token, str2tokens};
 use crate::utils::load::load_logits_processor;
 use anyhow::{Error, Result};
 use candle_examples::token_output_stream::TokenOutputStream;
-use futures_util::{pin_mut, StreamExt};
+use candle_transformers::models::quantized_qwen2::ModelWeights;
 use hf_chat_template::ChatContext;
 use std::io::Write;
 use std::{env, io};
-use tokenizers::Tokenizer;
-
-fn str2tokens(string: &str, tokenizer: &Tokenizer) -> Result<Vec<u32>> {
-    let tokens = tokenizer.encode(string, true).map_err(Error::msg)?;
-    let tokens = tokens.get_ids().to_vec();
-
-    Ok(tokens)
-}
 
 #[tokio::test]
 async fn test_tokenizer() -> Result<()> {
     let config = BaseConfig::<Which>::default();
-    println!("{:?}", config.which);
+    println!("{:?}", config);
 
     let tokenizer = config.setup_tokenizer().await?;
     // println!("{:#?}", tokenizer.get_added_vocabulary());
 
     // token -> id
-    let eos_token = config.which.eos_token();
+    let eos_token = config.which.info().eos_token;
     let eos_id = tokenizer.token_to_id(&eos_token).unwrap();
 
     // id -> token
     assert_eq!(
-        tokenizer.decode(&[eos_id], true).map_err(Error::msg)?,
-        tokenizer
-            .id_to_token(eos_id)
-            .map(|t| if t == eos_token { String::new() } else { t })
-            .unwrap(),
+        tokenizer.decode(&[eos_id], false).map_err(Error::msg)?,
+        tokenizer.id_to_token(eos_id).unwrap(),
     );
 
     let tokens = [
@@ -80,19 +69,17 @@ async fn test_prompt() -> Result<()> {
     let config = BaseConfig::<Which>::default();
     println!("{config:?}");
 
+    let info = config.which.info();
     // 初始化模型、分词器和logits处理器
-    let mut model = config.setup_model().await?;
+    let mut model = config.setup_model::<ModelWeights>().await?;
     let mut tos = TokenOutputStream::new(config.setup_tokenizer().await?);
     let mut logits_processor =
         load_logits_processor(config.temperature, config.seed, config.top_k, config.top_p);
-    let mut ctx = ChatContext::new(config.which.tokenizer_repo()).await?;
+    let mut ctx = ChatContext::new(info.tokenizer_repo).await?;
 
     // 初始化上下文token列表
     let mut ctx_tokens = vec![];
-    let eos_token = tos
-        .tokenizer()
-        .token_to_id(config.which.eos_token())
-        .unwrap();
+    let eos_token = tos.tokenizer().token_to_id(info.eos_token).unwrap();
     let to_sample = config.sample_len.saturating_sub(1);
 
     let prompts = vec![
@@ -115,7 +102,7 @@ async fn test_prompt() -> Result<()> {
         let mut next_token = gen_next_token(
             &ctx_tokens,
             0,
-            ModelWeight::Qwen(&mut model),
+            &mut model,
             &mut logits_processor,
             &config,
             None,
@@ -134,7 +121,7 @@ async fn test_prompt() -> Result<()> {
             next_token = gen_next_token(
                 &ctx_tokens,
                 ans_start_idx + index,
-                ModelWeight::Qwen(&mut model),
+                &mut model,
                 &mut logits_processor,
                 &config,
                 Some(ans_start_idx),
@@ -177,29 +164,3 @@ async fn test_prompt() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn test_chat() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
-    unsafe {
-        env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
-    }
-    let config = BaseConfig::default();
-    println!("{config:?}");
-
-    let mut text_gen = TextGeneration::new(config).await?;
-
-    loop {
-        // 获取用户输入
-        let prompt_str = get_user_prompt();
-
-        // 创建 stream 并 pin 它
-        let stream = text_gen.chat(&prompt_str);
-        pin_mut!(stream); // 使用 pin_mut! 宏来固定 stream
-
-        while let Some(Ok(t)) = stream.next().await {
-            print!("{t}");
-            io::stdout().flush()?;
-        }
-    }
-}

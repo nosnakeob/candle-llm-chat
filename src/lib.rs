@@ -1,230 +1,157 @@
 #[macro_use]
-extern crate tracing;
-#[macro_use]
 extern crate anyhow;
+#[macro_use]
+extern crate tracing;
 
-use std::sync::{Arc, Mutex};
-use std::time;
-
-use anyhow::Result;
-use candle::Tensor;
-use candle_transformers::models::quantized_llama::ModelWeights;
-use candle_transformers::utils::apply_repeat_penalty;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::Receiver;
-
-use crate::arg::Args;
+use crate::config::BaseConfig;
+use crate::models::{Forward, FromGGUF, HubInfo, HubModelInfo};
+use crate::utils::load::{load_gguf, load_logits_processor, load_tokenizer};
+use anyhow::{Error, Result};
+use async_stream::try_stream;
+use candle::quantized::gguf_file::Content;
+use candle::{Device, Tensor};
 use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
+use candle_transformers::models::quantized_qwen2::ModelWeights;
+use candle_transformers::utils::apply_repeat_penalty;
+use futures_core::stream::Stream;
+use hf_chat_template::{ChatContext, Message, Role};
+use std::io::{Read, Seek};
+use std::ops::Deref;
+use tokenizers::Tokenizer;
 
-mod arg;
+mod config;
 mod models;
 #[cfg(test)]
 mod tests;
 mod utils;
 
-pub struct ChatBot {
-    model: Arc<Mutex<ModelWeights>>,
-    tos: Arc<Mutex<TokenOutputStream>>,
-    logits_processor: Arc<Mutex<LogitsProcessor>>,
-
-    args: Args,
-    eos_token: u32,
+// 一次对话
+pub struct TextGeneration<W, Wi> {
+    model: W,
+    tos: TokenOutputStream,
+    logits_processor: LogitsProcessor,
+    config: BaseConfig<Wi>,
+    ctx_tokens: Vec<u32>,
+    eos_token_id: u32,
+    ctx: ChatContext,
 }
 
-impl ChatBot {
-    pub async fn from_args(args: Args) -> Result<Self> {
-        let model = args.model().await?;
-
-        let tokenizer = args.tokenizer().await?;
-        let tos = TokenOutputStream::new(tokenizer);
-
-        let eos_token = tos.tokenizer().token_to_id("<|end_of_turn|>").unwrap();
-
-        let logits_processor = LogitsProcessor::new(args.seed, Some(args.temperature), None);
+impl<W: Forward + FromGGUF, Wi: HubInfo> TextGeneration<W, Wi> {
+    pub async fn new(config: BaseConfig<Wi>) -> Result<Self> {
+        let tokenizer = config.setup_tokenizer().await?;
+        let eos_token = tokenizer
+            .token_to_id(config.which.info().eos_token)
+            .unwrap();
 
         Ok(Self {
-            model: Arc::new(Mutex::new(model)),
-            tos: Arc::new(Mutex::new(tos)),
-            logits_processor: Arc::new(Mutex::new(logits_processor)),
-            args,
-            eos_token,
+            model: config.setup_model().await?,
+            tos: TokenOutputStream::new(tokenizer),
+            logits_processor: load_logits_processor(
+                config.temperature,
+                config.seed,
+                config.top_k,
+                config.top_p,
+            ),
+            ctx: ChatContext::new(config.which.info().tokenizer_repo).await?,
+            config,
+            ctx_tokens: Vec::with_capacity(1024),
+            eos_token_id: eos_token,
         })
     }
 
-    pub async fn from_default_args() -> Result<Self> {
-        Self::from_args(Args::default()).await
-    }
+    pub fn chat<'a>(&'a mut self, prompt: &'a str) -> impl Stream<Item = Result<String>> + 'a {
+        let mut answer = String::new();
+        let mut ans_tokens = vec![];
+        self.ctx.push_msg(prompt);
 
-    /// 创建子任务让模型不断预测(耗时任务)下一个token放入channel
-    /// 用户可以从channel中获取回答
-    pub fn chat(&mut self, input: String) -> Receiver<String> {
-        let (tx, rx) = mpsc::channel(self.args.sample_len);
+        try_stream!({
+            let prompt = self.ctx.render()?;
+            // println!("prompt: {}", prompt);
+            self.ctx_tokens = self.str2tokens(&prompt)?;
 
-        let model = self.model.clone();
-        let tos = self.tos.clone();
-        let logits_processor = self.logits_processor.clone();
-        let args = self.args.clone();
-        let eos_token = self.eos_token;
+            let start = std::time::Instant::now();
 
-        tokio::spawn(async move {
-            let prompt = format!("User: {} <|end_of_turn|> Assistant: ", input.trim());
+            // 生成第一个token
+            let mut next_token = self.gen_next_token(0, None)?;
+            let ans_start_idx = self.ctx_tokens.len();
+            self.ctx_tokens.push(next_token);
+            ans_tokens.push(next_token);
 
-            let tokens = tos.lock().unwrap()
-                .tokenizer()
-                .encode(prompt, true).unwrap();
-
-            let prompt_tokens = tokens.get_ids();
-            let mut all_tokens = vec![];
-
-            let start_prompt_processing = time::Instant::now();
-
-            let mut next_token = {
-                let input = Tensor::new(prompt_tokens, &args.device).unwrap()
-                    .unsqueeze(0).unwrap();
-                let logits = model.lock().unwrap()
-                    .forward(&input, 0).unwrap();
-                let logits = logits.squeeze(0).unwrap();
-                logits_processor.lock().unwrap()
-                    .sample(&logits).unwrap()
-            };
-            let prompt_dt = start_prompt_processing.elapsed();
-
-            // 第一个单词
-            let first_word = tos.lock().unwrap().next_token(next_token).unwrap();
-            if let Some(t) = first_word {
-                tx.send(t).await.unwrap();
+            if let Some(t) = self.tos.next_token(next_token)? {
+                answer.push_str(&t);
+                yield t;
             }
 
-            let start_post_prompt = time::Instant::now();
-            let mut sampled = 1;
-            while sampled < args.sample_len {
-                let input = Tensor::new(&[next_token], &args.device).unwrap()
-                    .unsqueeze(0).unwrap();
-                let logits = model.lock().unwrap()
-                    .forward(&input, prompt_tokens.len() + sampled).unwrap();
-                let logits = logits.squeeze(0).unwrap();
-                let logits = if args.repeat_penalty == 1. {
-                    logits
-                } else {
-                    let start_at = all_tokens.len().saturating_sub(args.repeat_last_n);
-                    apply_repeat_penalty(
-                        &logits,
-                        args.repeat_penalty,
-                        &all_tokens[start_at..],
-                    ).unwrap()
-                };
-                next_token = logits_processor.lock().unwrap().sample(&logits).unwrap();
-                all_tokens.push(next_token);
-                let word = tos.lock().unwrap()
-                    .next_token(next_token).unwrap();
+            // 循环生成回答
+            for index in 0..self.config.sample_len.saturating_sub(1) {
+                next_token = self.gen_next_token(ans_start_idx + index, Some(ans_start_idx))?;
+                self.ctx_tokens.push(next_token);
+                ans_tokens.push(next_token);
 
-                if let Some(t) = word {
-                    tx.send(t).await.unwrap();
+                if let Some(t) = self.tos.next_token(next_token)? {
+                    answer.push_str(&t);
+                    yield t;
                 }
 
-                sampled += 1;
-                if next_token == eos_token {
+                if next_token == self.eos_token_id {
                     break;
-                };
-            }
-            let rest = tos.lock().unwrap().decode_rest().unwrap();
-            if let Some(rest) = rest {
-                tx.send(rest).await.unwrap();
+                }
             }
 
-            let dt = start_post_prompt.elapsed();
+            if let Some(t) = self.tos.decode_rest()? {
+                answer.push_str(&t);
+                yield t;
+            }
 
-            info!("{} prompt tokens processed: {:.2} token/s",
-            prompt_tokens.len(),
-            prompt_tokens.len() as f64 / prompt_dt.as_secs_f64(),
-        );
-            info!("{sampled} tokens generated: {:.2} token/s",
-            sampled as f64 / dt.as_secs_f64(),
-        );
+            self.ctx.push_msg(&answer);
+            // println!("{:?}", ans_tokens);
+            self.tos.clear();
 
-            tos.lock().unwrap().clear();
-        });
+            info!(
+                "speed: {:.2} token/s, total tokens: {}",
+                (self.ctx_tokens.len() - ans_start_idx) as f64 / start.elapsed().as_secs_f64(),
+                self.ctx_tokens.len()
+            );
+        })
+    }
 
-        rx
+    fn str2tokens(&mut self, string: &str) -> Result<Vec<u32>> {
+        let tokens = self
+            .tos
+            .tokenizer()
+            .encode(string, true)
+            .map_err(Error::msg)?;
+        let tokens = tokens.get_ids().to_vec();
+
+        Ok(tokens)
+    }
+
+    fn gen_next_token(&mut self, idx_pos: usize, ans_start_idx: Option<usize>) -> Result<u32> {
+        let input = match ans_start_idx {
+            Some(_) => Tensor::new(&[*self.ctx_tokens.last().unwrap()], &self.config.device)?,
+            // 首个字符
+            None => Tensor::new(&*self.ctx_tokens, &self.config.device)?,
+        }
+        .unsqueeze(0)?;
+
+        // 获取模型输出并压缩维度
+        let mut logits = self.model.forward(&input, idx_pos)?.squeeze(0)?;
+
+        // 非首个字符应用惩罚
+        if let Some(ans_start_idx) = ans_start_idx {
+            if self.config.repeat_penalty != 1. {
+                let ans_tokens = &self.ctx_tokens[ans_start_idx..];
+                let start_at = ans_tokens.len().saturating_sub(self.config.repeat_last_n);
+                logits = apply_repeat_penalty(
+                    &logits,
+                    self.config.repeat_penalty,
+                    &ans_tokens[start_at..],
+                )?;
+            }
+        }
+
+        // 采样下一个token
+        self.logits_processor.sample(&logits).map_err(Error::msg)
     }
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use candle::utils::{with_avx, with_f16c, with_neon, with_simd128};
-//     use candle::{cuda, quantized};
-//     use std::io::Write;
-// 
-//     #[tokio::test]
-//     async fn t_chatbot_recv() -> Result<()> {
-//         tracing_subscriber::fmt::init();
-// 
-//         let mut chatbot = ChatBot::from_default_args().await?;
-// 
-//         let mut input = "hi".to_string();
-//         let mut rx = chatbot.chat(input);
-// 
-//         print!("output: ");
-//         // 一个一个token接收
-//         while let Some(word) = rx.recv().await {
-//             print!("{}", word);
-//         }
-//         println!();
-// 
-//         input = "what can you do?".to_string();
-//         rx = chatbot.chat(input);
-// 
-//         print!("output: ");
-//         // 一次接收一组, 可能模型来不及生成
-//         let cap = 68;
-//         let mut buf = Vec::with_capacity(cap);
-//         while rx.recv_many(&mut buf, cap).await > 0 {
-//             print!("{}", buf.join(""));
-//             buf.clear();
-//         }
-// 
-//         Ok(())
-//     }
-// 
-//     #[tokio::test]
-//     async fn t_chatbot() -> Result<()> {
-//         quantized::cuda::set_force_dmmv(false);
-// 
-//         cuda::set_gemm_reduced_precision_f16(true);
-//         cuda::set_gemm_reduced_precision_bf16(true);
-// 
-//         info!(
-//             "avx: {}, neon: {}, simd128: {}, f16c: {}",
-//             with_avx(),
-//             with_neon(),
-//             with_simd128(),
-//             with_f16c()
-//         );
-// 
-//         let mut bot = ChatBot::from_default_args().await?;
-// 
-//         // loop {
-//         for _ in 0..3 {
-//             print!("> ");
-//             // 把缓冲区字符串刷到控制台上
-//             std::io::stdout().flush()?;
-//             let mut prompt = String::new();
-//             std::io::stdin().read_line(&mut prompt)?;
-// 
-//             print!("bot: ");
-// 
-//             let mut rx = bot.chat(prompt);
-// 
-//             while let Some(word) = rx.recv().await {
-//                 print!("{word}");
-//                 std::io::stdout().flush()?;
-//             }
-// 
-//             println!();
-//         }
-// 
-//         Ok(())
-//     }
-// }
