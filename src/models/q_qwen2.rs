@@ -37,6 +37,8 @@ pub enum Which {
 }
 
 impl HubInfo for Which {
+    type ModelWeight = ModelWeights;
+
     fn info(&self) -> HubModelInfo {
         let (qwen_eos, ds_eos) = ("<|im_end|>", "<｜end▁of▁sentence｜>");
         match self {
@@ -103,4 +105,3 @@ impl HubInfo for Which {
         }
     }
 }
-

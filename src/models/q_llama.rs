@@ -28,6 +28,8 @@ pub enum Which {
 }
 
 impl HubInfo for Which {
+    type ModelWeight = ModelWeights;
+
     fn info(&self) -> HubModelInfo {
         match self {
             Which::SmolLM2_1BInstruct => HubModelInfo {

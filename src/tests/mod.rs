@@ -63,7 +63,7 @@ async fn test_chat() -> Result<()> {
     let config = BaseConfig::<q_qwen2::Which>::default();
     println!("{config:?}");
 
-    let mut text_gen = TextGeneration::<quantized_qwen2::ModelWeights, _>::new(config).await?;
+    let mut text_gen = TextGeneration::new(config).await?;
 
     loop {
         // 获取用户输入

@@ -16,6 +16,9 @@ pub struct HubModelInfo {
 }
 
 pub trait HubInfo {
+    // 添加关联类型，指定该配置对应的模型权重类型
+    type ModelWeight: FromGGUF + Forward;
+
     fn info(&self) -> HubModelInfo;
 }
 

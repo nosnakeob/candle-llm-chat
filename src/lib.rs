@@ -27,8 +27,8 @@ mod tests;
 mod utils;
 
 // 一次对话
-pub struct TextGeneration<W, Wi> {
-    model: W,
+pub struct TextGeneration<Wi: HubInfo> {
+    model: Wi::ModelWeight,
     tos: TokenOutputStream,
     logits_processor: LogitsProcessor,
     config: BaseConfig<Wi>,
@@ -37,7 +37,7 @@ pub struct TextGeneration<W, Wi> {
     ctx: ChatContext,
 }
 
-impl<W: Forward + FromGGUF, Wi: HubInfo> TextGeneration<W, Wi> {
+impl<Wi: HubInfo> TextGeneration<Wi> {
     pub async fn new(config: BaseConfig<Wi>) -> Result<Self> {
         let tokenizer = config.setup_tokenizer().await?;
         let eos_token = tokenizer

@@ -1,6 +1,6 @@
 use crate::models::{FromGGUF, HubInfo};
 use crate::utils::load::{load_gguf, load_tokenizer};
-use anyhow::{Error, Result};
+use anyhow::Result;
 use candle::Device;
 use tokenizers::Tokenizer;
 
@@ -60,10 +60,10 @@ impl<W: Default> From<W> for BaseConfig<W> {
 }
 
 impl<Wi: HubInfo> BaseConfig<Wi> {
-    pub async fn setup_model<W: FromGGUF>(&self) -> Result<W> {
+    pub async fn setup_model(&self) -> Result<Wi::ModelWeight> {
         let info = self.which.info();
         let (mut file, model) = load_gguf(info.model_repo, info.model_file).await?;
-        let model = W::from_gguf(model, &mut file, &self.device)?;
+        let model = Wi::ModelWeight::from_gguf(model, &mut file, &self.device)?;
 
         Ok(model)
     }

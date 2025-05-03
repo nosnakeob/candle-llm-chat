@@ -71,7 +71,7 @@ async fn test_prompt() -> Result<()> {
 
     let info = config.which.info();
     // 初始化模型、分词器和logits处理器
-    let mut model = config.setup_model::<ModelWeights>().await?;
+    let mut model = config.setup_model().await?;
     let mut tos = TokenOutputStream::new(config.setup_tokenizer().await?);
     let mut logits_processor =
         load_logits_processor(config.temperature, config.seed, config.top_k, config.top_p);
