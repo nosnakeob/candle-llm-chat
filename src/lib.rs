@@ -44,8 +44,9 @@ impl<W: Forward + FromGGUF, Wi: HubInfo> TextGeneration<W, Wi> {
             .token_to_id(config.which.info().eos_token)
             .unwrap();
 
+        let model = config.setup_model().await?;
         Ok(Self {
-            model: config.setup_model().await?,
+            model,
             tos: TokenOutputStream::new(tokenizer),
             logits_processor: load_logits_processor(
                 config.temperature,
@@ -73,23 +74,27 @@ impl<W: Forward + FromGGUF, Wi: HubInfo> TextGeneration<W, Wi> {
             let start = std::time::Instant::now();
 
             // 生成第一个token
-            let mut next_token = self.gen_next_token(0, None)?;
+            let first_token = self.gen_next_token(0, None)?;
+            let mut next_token = first_token;
             let ans_start_idx = self.ctx_tokens.len();
             self.ctx_tokens.push(next_token);
             ans_tokens.push(next_token);
 
-            if let Some(t) = self.tos.next_token(next_token)? {
+            let first_decoded_token_opt = self.tos.next_token(next_token)?;
+            if let Some(t) = first_decoded_token_opt {
                 answer.push_str(&t);
                 yield t;
             }
 
             // 循环生成回答
             for index in 0..self.config.sample_len.saturating_sub(1) {
-                next_token = self.gen_next_token(ans_start_idx + index, Some(ans_start_idx))?;
+                let generated_token = self.gen_next_token(ans_start_idx + index, Some(ans_start_idx))?;
+                next_token = generated_token; // Reassign if needed, or use generated_token directly
                 self.ctx_tokens.push(next_token);
                 ans_tokens.push(next_token);
 
-                if let Some(t) = self.tos.next_token(next_token)? {
+                let decoded_token_opt = self.tos.next_token(next_token)?;
+                if let Some(t) = decoded_token_opt {
                     answer.push_str(&t);
                     yield t;
                 }

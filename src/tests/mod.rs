@@ -73,9 +73,15 @@ async fn test_chat() -> Result<()> {
         let stream = text_gen.chat(&prompt_str);
         pin_mut!(stream); // 使用 pin_mut! 宏来固定 stream
 
-        while let Some(Ok(t)) = stream.next().await {
-            print!("{t}");
-            io::stdout().flush()?;
+        loop {
+            let next_item = stream.next().await;
+            if let Some(Ok(t)) = next_item {
+                print!("{t}");
+                io::stdout().flush()?;
+            } else {
+                // Handle error or end of stream
+                break;
+            }
         }
     }
 }

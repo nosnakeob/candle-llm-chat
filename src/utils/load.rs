@@ -99,10 +99,11 @@ pub async fn load_gguf(repo: &str, filename: &str) -> Result<(File, Content)> {
         total_size_in_bytes +=
             elem_count * tensor.ggml_dtype.type_size() / tensor.ggml_dtype.block_size();
     }
+    let formatted_size = format_size(total_size_in_bytes);
     info!(
         "loaded {:?} tensors ({}) in {:.2}s",
         model.tensor_infos.len(),
-        &format_size(total_size_in_bytes),
+        &formatted_size,
         start.elapsed().as_secs_f32(),
     );
 
