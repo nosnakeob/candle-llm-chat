@@ -11,9 +11,9 @@ anyhow = "1"
 tokio = { version = "1", features = ["full"] }
 intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"] }
 
-candle = { package = "candle-core", version = "0.8", features = ["cuda"] }
-candle-transformers = { version = "0.8", features = ["cuda"] }
-candle-examples = "0.8"
+candle = { package = "candle-core", version = "0.9", features = ["cuda"] }
+candle-transformers = { version = "0.9", features = ["cuda"] }
+candle-examples = "0.9"
 
 hf-hub = { version = "0.4", features = ["tokio"] }
 tokenizers = "0.21"
