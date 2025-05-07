@@ -62,7 +62,7 @@ impl<Wi: HubInfo> TextGeneration<Wi> {
     }
 
     pub fn chat<'a>(&'a mut self, prompt: &'a str) -> impl Stream<Item = Result<String>> + 'a {
-        let mut answer = String::new();
+        let mut answer = String::with_capacity(1024);
         let mut ans_tokens = vec![];
         self.ctx.push_msg(prompt);
 
@@ -73,23 +73,15 @@ impl<Wi: HubInfo> TextGeneration<Wi> {
 
             let start = std::time::Instant::now();
 
-            // 生成第一个token
-            let first_token = self.gen_next_token(0, None)?;
-            let mut next_token = first_token;
             let ans_start_idx = self.ctx_tokens.len();
-            self.ctx_tokens.push(next_token);
-            ans_tokens.push(next_token);
-
-            let first_decoded_token_opt = self.tos.next_token(next_token)?;
-            if let Some(t) = first_decoded_token_opt {
-                answer.push_str(&t);
-                yield t;
-            }
 
             // 循环生成回答
-            for index in 0..self.config.sample_len.saturating_sub(1) {
-                let generated_token = self.gen_next_token(ans_start_idx + index, Some(ans_start_idx))?;
-                next_token = generated_token; // Reassign if needed, or use generated_token directly
+            for index in 0..self.config.sample_len {
+                let next_token  = if index == 0 {
+                    self.gen_next_token(0, None)?
+                } else {
+                    self.gen_next_token(ans_start_idx + index - 1, Some(ans_start_idx))?
+                };
                 self.ctx_tokens.push(next_token);
                 ans_tokens.push(next_token);
 

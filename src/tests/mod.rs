@@ -69,10 +69,8 @@ fn gen_next_token<Wi: HubInfo>(
 #[tokio::test]
 async fn test_chat() -> Result<()> {
     tracing_subscriber::fmt::init();
+    let _proxy = ProxyGuard::new("http://127.0.0.1:10808");
 
-    unsafe {
-        env::set_var("HTTPS_PROXY", "http://127.0.0.1:10808");
-    }
     let config = BaseConfig::<q_qwen2::Which>::default();
     println!("{config:?}");
 

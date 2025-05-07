@@ -50,15 +50,6 @@ impl<W: Default> Default for BaseConfig<W> {
     }
 }
 
-impl<W: Default> From<W> for BaseConfig<W> {
-    fn from(value: W) -> Self {
-        Self {
-            which: value,
-            ..Default::default()
-        }
-    }
-}
-
 impl<Wi: HubInfo> BaseConfig<Wi> {
     pub async fn setup_model(&self) -> Result<Wi::ModelWeight> {
         let info = self.which.info();
