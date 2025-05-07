@@ -11,7 +11,11 @@ pub mod q_qwen2;
 macro_rules! impl_model_traits {
     ($weight:ty) => {
         impl crate::models::Forward for $weight {
-            fn forward(&mut self, x: &candle::Tensor, index_pos: usize) -> anyhow::Result<candle::Tensor> {
+            fn forward(
+                &mut self,
+                x: &candle::Tensor,
+                index_pos: usize,
+            ) -> anyhow::Result<candle::Tensor> {
                 self.forward(x, index_pos).map_err(anyhow::Error::msg)
             }
         }
@@ -20,7 +24,7 @@ macro_rules! impl_model_traits {
             fn from_gguf<R: std::io::Seek + std::io::Read>(
                 ct: candle::quantized::gguf_file::Content,
                 reader: &mut R,
-                device: &candle::Device
+                device: &candle::Device,
             ) -> anyhow::Result<Self> {
                 Self::from_gguf(ct, reader, device).map_err(anyhow::Error::msg)
             }

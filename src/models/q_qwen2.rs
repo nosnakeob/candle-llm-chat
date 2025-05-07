@@ -1,7 +1,5 @@
-extern crate intel_mkl_src;
-
-use crate::models::{HubInfo, HubModelInfo};
 use crate::impl_model_traits;
+use crate::models::{HubInfo, HubModelInfo};
 use candle_transformers::models::quantized_qwen2::ModelWeights;
 
 impl_model_traits!(ModelWeights);

@@ -9,7 +9,7 @@ unused = "allow"
 [dependencies]
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
-intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"] }
+# intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"] }
 
 candle = { package = "candle-core", version = "0.9", features = ["cuda"] }
 candle-transformers = { version = "0.9", features = ["cuda"] }
