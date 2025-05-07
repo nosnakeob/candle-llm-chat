@@ -1,7 +1,7 @@
 pub mod load;
 
-use std::io;
 use std::io::BufRead;
+use std::{env, io};
 
 pub fn format_size(size_in_bytes: usize) -> String {
     if size_in_bytes < 1_000 {
@@ -28,4 +28,23 @@ pub fn get_user_prompt() -> String {
     line = line.trim().to_string();
 
     line
+}
+
+pub struct ProxyGuard;
+
+impl ProxyGuard {
+    pub fn new(proxy: &str) -> Self {
+        unsafe {
+            env::set_var("HTTPS_PROXY", proxy);
+        }
+        Self
+    }
+}
+
+impl Drop for ProxyGuard {
+    fn drop(&mut self) {
+        unsafe {
+            env::remove_var("HTTPS_PROXY");
+        }
+    }
 }

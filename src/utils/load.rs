@@ -5,7 +5,7 @@ use candle_transformers::generation::{LogitsProcessor, Sampling};
 use config;
 use futures_util::future::try_join_all;
 use hf_hub::api::tokio::ApiBuilder;
-use hf_hub::{api::tokio::Api, Cache, Repo};
+use hf_hub::{Cache, Repo, api::tokio::Api};
 use std::{fs::File, path::PathBuf, process::Command};
 use tokenizers::Tokenizer;
 
