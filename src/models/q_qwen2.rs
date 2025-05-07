@@ -1,23 +1,10 @@
 extern crate intel_mkl_src;
 
-use crate::models::{Forward, FromGGUF, HubInfo, HubModelInfo};
-use anyhow::{Error, Result};
-use candle::quantized::gguf_file::Content;
-use candle::{Device, Tensor};
+use crate::models::{HubInfo, HubModelInfo};
+use crate::impl_model_traits;
 use candle_transformers::models::quantized_qwen2::ModelWeights;
-use std::io::{Read, Seek};
 
-impl Forward for ModelWeights {
-    fn forward(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
-        self.forward(x, index_pos).map_err(Error::msg)
-    }
-}
-
-impl FromGGUF for ModelWeights {
-    fn from_gguf<R: Seek + Read>(ct: Content, reader: &mut R, device: &Device) -> Result<Self> {
-        ModelWeights::from_gguf(ct, reader, device).map_err(Error::msg)
-    }
-}
+impl_model_traits!(ModelWeights);
 
 /// 支持模型型号
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
