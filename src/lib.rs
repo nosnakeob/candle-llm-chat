@@ -43,9 +43,8 @@ impl<Wi: HubInfo> TextGeneration<Wi> {
             .token_to_id(config.which.info().eos_token)
             .unwrap();
 
-        let model = config.setup_model().await?;
         Ok(Self {
-            model,
+            model: config.setup_model().await?,
             tos: TokenOutputStream::new(tokenizer),
             logits_processor: load_logits_processor(
                 config.temperature,
@@ -81,8 +80,7 @@ impl<Wi: HubInfo> TextGeneration<Wi> {
                 };
                 ctx_tokens.push(next_token);
 
-                let decoded_token_opt = self.tos.next_token(next_token)?;
-                if let Some(t) = decoded_token_opt {
+                if let Some(t) = self.tos.next_token(next_token)? {
                     answer.push_str(&t);
                     yield t;
                 }
@@ -125,12 +123,13 @@ impl<Wi: HubInfo> TextGeneration<Wi> {
         idx_pos: usize,
         ans_start_idx: Option<usize>,
     ) -> Result<u32> {
-        let input = match ans_start_idx {
-            Some(_) => Tensor::new(&[*ctx_tokens.last().unwrap()], &self.config.device)?,
+        let input_arr = match ans_start_idx {
+            Some(_) => &[*ctx_tokens.last().unwrap()],
             // 首个字符
-            None => Tensor::new(&**ctx_tokens, &self.config.device)?,
-        }
-        .unsqueeze(0)?;
+            None => &**ctx_tokens,
+        };
+
+        let input = Tensor::new(input_arr, &self.config.device)?.unsqueeze(0)?;
 
         // 获取模型输出并压缩维度
         let mut logits = self.model.forward(&input, idx_pos)?.squeeze(0)?;

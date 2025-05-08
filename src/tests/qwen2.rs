@@ -1,15 +1,8 @@
 use crate::config::BaseConfig;
-use crate::models::HubInfo;
 use crate::models::q_qwen2::Which;
-use crate::tests::{gen_next_token, str2tokens};
-use crate::utils::ProxyGuard;
-use crate::utils::load::load_logits_processor;
+use crate::models::HubInfo;
 use anyhow::{Error, Result};
 use candle_examples::token_output_stream::TokenOutputStream;
-use candle_transformers::models::quantized_qwen2::ModelWeights;
-use hf_chat_template::ChatContext;
-use std::io::Write;
-use std::{env, io};
 
 #[tokio::test]
 async fn test_tokenizer() -> Result<()> {

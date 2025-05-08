@@ -76,25 +76,21 @@ async fn test_chat() -> Result<()> {
 
     let mut text_gen = TextGeneration::new(config).await?;
 
-    loop {
+    for _ in 0..3 {
         // 获取用户输入
         let prompt_str = get_user_prompt();
-
+        
         // 创建 stream 并 pin 它
         let stream = text_gen.chat(&prompt_str);
         pin_mut!(stream); // 使用 pin_mut! 宏来固定 stream
-
-        loop {
-            let next_item = stream.next().await;
-            if let Some(Ok(t)) = next_item {
-                print!("{t}");
-                io::stdout().flush()?;
-            } else {
-                // Handle error or end of stream
-                break;
-            }
+        
+        while let Some(Ok(t)) = stream.next().await {
+            print!("{t}");
+            io::stdout().flush()?;
         }
     }
+    
+    Ok(())
 }
 
 #[tokio::test]
@@ -137,19 +133,11 @@ async fn test_prompt() -> Result<()> {
         for index in 0..config.sample_len {
             let next_token = gen_next_token(
                 &ctx_tokens,
-                if index == 0 {
-                    0
-                } else {
-                    ans_start_idx + index - 1
-                },
+                if index == 0 { 0 } else { ans_start_idx + index - 1 },
                 &mut model,
                 &mut logits_processor,
                 &config,
-                if index == 0 {
-                    None
-                } else {
-                    Some(ans_start_idx)
-                },
+                if index == 0 { None } else { Some(ans_start_idx) },
             )?;
             ctx_tokens.push(next_token);
 
