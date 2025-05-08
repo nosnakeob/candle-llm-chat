@@ -7,12 +7,14 @@ edition = "2024"
 unused = "allow"
 
 [dependencies]
-anyhow = "1"
-tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+tokio = "1.45"
 # intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"] }
 
-candle = { package = "candle-core", version = "0.9", features = ["cuda"] }
-candle-transformers = { version = "0.9", features = ["cuda"] }
+candle = { package = "candle-core", version = "0.9" }
+candle-nn = "0.9"
+# feat mkl STATUS_DLL_NOT_FOUND
+candle-transformers = { version = "0.9", features = ["cuda", "cudnn", "flash-attn"] }
 candle-examples = "0.9"
 
 hf-hub = { version = "0.4", features = ["tokio"] }
@@ -23,9 +25,11 @@ futures-core = "0.3"
 futures-util = "0.3"
 
 tracing = "0.1"
-tracing-subscriber = "0.3"
 
-which = "7"
+which = "7.0"
 
 config = "0.15"
 hf-chat-template = { version = "0.3", git = "https://github.com/nosnakeob/hf-chat-template.git" }
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
