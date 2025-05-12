@@ -5,6 +5,7 @@ use std::io::{Read, Seek};
 
 pub mod q_llama;
 pub mod q_qwen2;
+pub mod q_qwen3;
 
 /// 实现模型 trait 的宏
 #[macro_export]

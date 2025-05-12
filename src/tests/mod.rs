@@ -1,20 +1,17 @@
 use crate::TextGeneration;
 use crate::config::BaseConfig;
-use crate::models::Forward;
-use crate::models::HubInfo;
-use crate::models::{q_llama, q_qwen2};
+use crate::models::{Forward, HubInfo, q_llama, q_qwen2, q_qwen3};
 use crate::utils::ProxyGuard;
 use crate::utils::get_user_prompt;
 use anyhow::{Error, Result};
 use candle::Tensor;
 use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
-use candle_transformers::models::{quantized_llama, quantized_qwen2};
 use candle_transformers::utils::apply_repeat_penalty;
 use futures_util::{StreamExt, pin_mut};
 use hf_chat_template::ChatContext;
+use std::io;
 use std::io::Write;
-use std::{env, io};
 use tokenizers::Tokenizer;
 
 mod quant;
@@ -68,24 +65,24 @@ async fn test_chat() -> Result<()> {
     for _ in 0..3 {
         // 获取用户输入
         let prompt_str = get_user_prompt();
-        
+
         // 创建 stream 并 pin 它
         let stream = text_gen.chat(&prompt_str);
         pin_mut!(stream); // 固定 stream
-        
+
         while let Some(Ok(t)) = stream.next().await {
             print!("{t}");
             io::stdout().flush()?;
         }
     }
-    
+
     Ok(())
 }
 
 #[tokio::test]
 async fn test_prompt() -> Result<()> {
     let _proxy = ProxyGuard::new("http://127.0.0.1:10808");
-    let config = BaseConfig::<q_qwen2::Which>::default();
+    let config = BaseConfig::<q_qwen3::Which>::default();
     println!("{config:?}");
 
     let info = config.which.info();
