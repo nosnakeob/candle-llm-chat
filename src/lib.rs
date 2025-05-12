@@ -5,7 +5,7 @@ extern crate tracing;
 
 use crate::config::BaseConfig;
 use crate::models::{Forward, FromGGUF, HubInfo, HubModelInfo};
-use crate::utils::load::{load_gguf, load_logits_processor, load_tokenizer};
+use crate::utils::load::{load_gguf, load_tokenizer};
 use anyhow::{Error, Result};
 use async_stream::try_stream;
 use candle::quantized::gguf_file::Content;
@@ -46,10 +46,9 @@ impl<Wi: HubInfo> TextGeneration<Wi> {
         Ok(Self {
             model: config.setup_model().await?,
             tos: TokenOutputStream::new(tokenizer),
-            logits_processor: load_logits_processor(
-                config.temperature,
+            logits_processor: LogitsProcessor::new(
                 config.seed,
-                config.top_k,
+                Some(config.temperature),
                 config.top_p,
             ),
             ctx: ChatContext::new(config.which.info().tokenizer_repo).await?,

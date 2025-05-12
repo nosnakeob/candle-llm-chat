@@ -5,7 +5,6 @@ use crate::models::HubInfo;
 use crate::models::{q_llama, q_qwen2};
 use crate::utils::ProxyGuard;
 use crate::utils::get_user_prompt;
-use crate::utils::load::load_logits_processor;
 use anyhow::{Error, Result};
 use candle::Tensor;
 use candle_examples::token_output_stream::TokenOutputStream;
@@ -26,16 +25,6 @@ fn str2tokens(string: &str, tokenizer: &Tokenizer) -> Result<Vec<u32>> {
     let tokens = tokens.get_ids().to_vec();
 
     Ok(tokens)
-}
-
-/// 输出token并更新answer字符串
-fn output_token(token: u32, tos: &mut TokenOutputStream, answer: &mut String) -> Result<()> {
-    if let Some(t) = tos.next_token(token)? {
-        print!("{}", t);
-        answer.push_str(&t);
-        io::stdout().flush()?;
-    }
-    Ok(())
 }
 
 fn gen_next_token<Wi: HubInfo>(
@@ -82,7 +71,7 @@ async fn test_chat() -> Result<()> {
         
         // 创建 stream 并 pin 它
         let stream = text_gen.chat(&prompt_str);
-        pin_mut!(stream); // 使用 pin_mut! 宏来固定 stream
+        pin_mut!(stream); // 固定 stream
         
         while let Some(Ok(t)) = stream.next().await {
             print!("{t}");
@@ -104,7 +93,7 @@ async fn test_prompt() -> Result<()> {
     let mut model = config.setup_model().await?;
     let mut tos = TokenOutputStream::new(config.setup_tokenizer().await?);
     let mut logits_processor =
-        load_logits_processor(config.temperature, config.seed, config.top_k, config.top_p);
+        LogitsProcessor::new(config.seed, Some(config.temperature), config.top_p);
     let mut ctx = ChatContext::new(info.tokenizer_repo).await?;
 
     // 初始化上下文token列表

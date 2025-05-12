@@ -9,25 +9,6 @@ use hf_hub::{Cache, Repo, api::tokio::Api};
 use std::{fs::File, path::PathBuf, process::Command};
 use tokenizers::Tokenizer;
 
-pub fn load_logits_processor(
-    temperature: f64,
-    seed: u64,
-    top_k: Option<usize>,
-    top_p: Option<f64>,
-) -> LogitsProcessor {
-    let sampling = if temperature <= 0. {
-        Sampling::ArgMax
-    } else {
-        match (top_k, top_p) {
-            (None, None) => Sampling::All { temperature },
-            (Some(k), None) => Sampling::TopK { k, temperature },
-            (None, Some(p)) => Sampling::TopP { p, temperature },
-            (Some(k), Some(p)) => Sampling::TopKThenTopP { k, p, temperature },
-        }
-    };
-    LogitsProcessor::from_sampling(seed, sampling)
-}
-
 /// 从指定仓库下载GGUF模型文件,支持下载分片模型文件,会自动检测并合并分片
 ///
 /// # 参数
@@ -92,9 +73,10 @@ pub async fn load_gguf(repo: &str, filename: &str) -> Result<(File, Content)> {
     let start = std::time::Instant::now();
 
     // 构建模型
-    let model = Content::read(&mut file).map_err(|e| e.with_path(&model_path))?;
+    let ct = Content::read(&mut file).map_err(|e| e.with_path(&model_path))?;
+    println!("{:?}", ct.metadata.get("tokenizer.ggml.eos_token_id"));
     let mut total_size_in_bytes = 0;
-    for (_, tensor) in model.tensor_infos.iter() {
+    for (_, tensor) in ct.tensor_infos.iter() {
         let elem_count = tensor.shape.elem_count();
         total_size_in_bytes +=
             elem_count * tensor.ggml_dtype.type_size() / tensor.ggml_dtype.block_size();
@@ -102,12 +84,12 @@ pub async fn load_gguf(repo: &str, filename: &str) -> Result<(File, Content)> {
     let formatted_size = format_size(total_size_in_bytes);
     info!(
         "loaded {:?} tensors ({}) in {:.2}s",
-        model.tensor_infos.len(),
+        ct.tensor_infos.len(),
         &formatted_size,
         start.elapsed().as_secs_f32(),
     );
 
-    Ok((file, model))
+    Ok((file, ct))
 }
 
 pub async fn load_tokenizer(repo: &str) -> Result<Tokenizer> {

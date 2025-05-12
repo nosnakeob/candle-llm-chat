@@ -15,9 +15,6 @@ pub struct BaseConfig<W> {
     /// Nucleus sampling probability cutoff.
     pub top_p: Option<f64>,
 
-    /// Only sample among the top K samples.
-    pub top_k: Option<usize>,
-
     /// The seed to use when generating random samples.
     pub seed: u64,
 
@@ -39,8 +36,8 @@ impl<W: Default> Default for BaseConfig<W> {
         Self {
             sample_len: 1000,
             temperature: 0.8,
+            // !有性能影响
             top_p: None,
-            top_k: None,
             seed: 299792458,
             device: candle_examples::device(false).unwrap(),
             repeat_penalty: 1.1,
