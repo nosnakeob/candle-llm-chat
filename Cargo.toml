@@ -11,15 +11,15 @@ anyhow = "1.0"
 tokio = "1.45"
 # intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"] }
 
-candle = { package = "candle-core", git = "https://github.com/nosnakeob/candle.git", branch = "fix-quantized-qwen3" }
-candle-nn = { git = "https://github.com/nosnakeob/candle.git", branch = "fix-quantized-qwen3" }
+candle = { package = "candle-core", git = "https://github.com/huggingface/candle.git" }
+candle-nn = { git = "https://github.com/huggingface/candle.git" }
 # feat mkl STATUS_DLL_NOT_FOUND
-candle-transformers = { git = "https://github.com/nosnakeob/candle.git", branch = "fix-quantized-qwen3", features = [
+candle-transformers = { git = "https://github.com/huggingface/candle.git", features = [
     "cuda",
     "cudnn",
     "flash-attn",
 ] }
-candle-examples = { git = "https://github.com/nosnakeob/candle.git", branch = "fix-quantized-qwen3" }
+candle-examples = { git = "https://github.com/huggingface/candle.git" }
 
 hf-hub = { version = "0.4", features = ["tokio"] }
 tokenizers = "0.21"

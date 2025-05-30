@@ -74,7 +74,6 @@ pub async fn load_gguf(repo: &str, filename: &str) -> Result<(File, Content)> {
 
     // 构建模型
     let ct = Content::read(&mut file).map_err(|e| e.with_path(&model_path))?;
-    println!("{:?}", ct.metadata.get("tokenizer.ggml.eos_token_id"));
     let mut total_size_in_bytes = 0;
     for (_, tensor) in ct.tensor_infos.iter() {
         let elem_count = tensor.shape.elem_count();
