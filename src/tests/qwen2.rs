@@ -12,16 +12,6 @@ async fn test_tokenizer() -> Result<()> {
     let tokenizer = config.setup_tokenizer().await?;
     // println!("{:#?}", tokenizer.get_added_vocabulary());
 
-    // token -> id
-    let eos_token = config.which.info().eos_token;
-    let eos_id = tokenizer.token_to_id(&eos_token).unwrap();
-
-    // id -> token
-    assert_eq!(
-        tokenizer.decode(&[eos_id], false).map_err(Error::msg)?,
-        tokenizer.id_to_token(eos_id).unwrap(),
-    );
-
     let tokens = [
         103942, 73670, 3837, 112735, 113195, 102936, 101036, 11319, 87752, 99639, 97084, 103358,
         48443, 144236, 84141, 106, 48738, 198, 144185, 48840, 239, 61138, 198, 144736, 8908, 227,

@@ -48,12 +48,13 @@ impl<W: Default> Default for BaseConfig<W> {
 }
 
 impl<Wi: HubInfo> BaseConfig<Wi> {
-    pub async fn setup_model(&self) -> Result<Wi::ModelWeight> {
+    pub async fn setup_model(&self) -> Result<(Wi::ModelWeight, u32)> {
         let info = self.which.info();
-        let (mut file, model) = load_gguf(info.model_repo, info.model_file).await?;
-        let model = Wi::ModelWeight::from_gguf(model, &mut file, &self.device)?;
+        let (mut file, ct) = load_gguf(info.model_repo, info.model_file).await?;
+        let eos_token_id = ct.metadata.get("tokenizer.ggml.eos_token_id").unwrap().to_u32()?;
+        let model = Wi::ModelWeight::from_gguf(ct, &mut file, &self.device)?;
 
-        Ok(model)
+        Ok((model, eos_token_id))
     }
 
     pub async fn setup_tokenizer(&self) -> Result<Tokenizer> {

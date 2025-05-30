@@ -25,67 +25,56 @@ impl HubInfo for Which {
     type ModelWeight = ModelWeights;
 
     fn info(&self) -> HubModelInfo {
-        let (qwen_eos, ds_eos) = ("<|im_end|>", "<｜end▁of▁sentence｜>");
         match self {
             Which::W2_0_5b => HubModelInfo {
                 model_repo: "Qwen/Qwen2-0.5B-Instruct-GGUF",
                 model_file: "qwen2-0_5b-instruct-q4_0",
                 tokenizer_repo: "Qwen/Qwen2-0.5B-Instruct",
-                eos_token: qwen_eos,
             },
             Which::W2_1_5b => HubModelInfo {
                 model_repo: "Qwen/Qwen2-1.5B-Instruct-GGUF",
                 model_file: "qwen2-1_5b-instruct-q4_0",
                 tokenizer_repo: "Qwen/Qwen2-1.5B-Instruct",
-                eos_token: qwen_eos,
             },
             Which::W2_7b => HubModelInfo {
                 model_repo: "Qwen/Qwen2-7B-Instruct-GGUF",
                 model_file: "qwen2-7b-instruct-q4_0",
                 tokenizer_repo: "Qwen/Qwen2-7B-Instruct",
-                eos_token: qwen_eos,
             },
             Which::W2_72b => HubModelInfo {
                 model_repo: "Qwen/Qwen2-72B-Instruct-GGUF",
                 model_file: "qwen2-72b-instruct-q4_0",
                 tokenizer_repo: "Qwen/Qwen2-72B-Instruct",
-                eos_token: qwen_eos,
             },
             Which::W25_0_5b => HubModelInfo {
                 model_repo: "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
                 model_file: "qwen2.5-0.5b-instruct-q4_0",
                 tokenizer_repo: "Qwen/Qwen2.5-0.5B-Instruct",
-                eos_token: qwen_eos,
             },
             Which::W25_1_5b => HubModelInfo {
                 model_repo: "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
                 model_file: "qwen2.5-1_5b-instruct-q4_0",
                 tokenizer_repo: "Qwen/Qwen2.5-1.5B-Instruct",
-                eos_token: qwen_eos,
             },
             Which::W25_7b => HubModelInfo {
                 model_repo: "Qwen/Qwen2.5-7B-Instruct-GGUF",
                 model_file: "qwen2.5-7b-instruct-q4_0",
                 tokenizer_repo: "Qwen/Qwen2.5-7B-Instruct",
-                eos_token: qwen_eos,
             },
             Which::W25_14b => HubModelInfo {
                 model_repo: "Qwen/Qwen2.5-14B-Instruct-GGUF",
                 model_file: "qwen2.5-14b-instruct-q4_0",
                 tokenizer_repo: "Qwen/Qwen2.5-14B-Instruct",
-                eos_token: qwen_eos,
             },
             Which::W25_32b => HubModelInfo {
                 model_repo: "Qwen/Qwen2.5-32B-Instruct-GGUF",
                 model_file: "qwen2.5-32b-instruct-q4_0",
                 tokenizer_repo: "Qwen/Qwen2.5-32B-Instruct",
-                eos_token: qwen_eos,
             },
             Which::DeepseekR1Qwen7B => HubModelInfo {
                 model_repo: "unsloth/DeepSeek-R1-Distill-Qwen-7B-GGUF",
                 model_file: "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M",
                 tokenizer_repo: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
-                eos_token: ds_eos,
             },
         }
     }

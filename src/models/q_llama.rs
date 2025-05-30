@@ -21,13 +21,11 @@ impl HubInfo for Which {
                 model_repo: "HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF",
                 model_file: "smollm2-1.7b-instruct-q4_k_m",
                 tokenizer_repo: "HuggingFaceTB/SmolLM2-1.7B-Instruct",
-                eos_token: "<|im_end|>",
             },
             Which::DeepseekR1Llama8b => HubModelInfo {
                 model_repo: "lmstudio-community/DeepSeek-R1-Distill-Llama-8B-GGUF",
                 model_file: "DeepSeek-R1-Distill-Llama-8B-Q4_K_M",
                 tokenizer_repo: "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-                eos_token: "<｜end▁of▁sentence｜>",
             },
         }
     }

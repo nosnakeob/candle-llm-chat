@@ -39,12 +39,10 @@ pub struct TextGeneration<Wi: HubInfo> {
 impl<Wi: HubInfo> TextGeneration<Wi> {
     pub async fn new(config: BaseConfig<Wi>) -> Result<Self> {
         let tokenizer = config.setup_tokenizer().await?;
-        let eos_token = tokenizer
-            .token_to_id(config.which.info().eos_token)
-            .unwrap();
+        let (model, eos_token_id) = config.setup_model().await?;
 
         Ok(Self {
-            model: config.setup_model().await?,
+            model,
             tos: TokenOutputStream::new(tokenizer),
             logits_processor: LogitsProcessor::new(
                 config.seed,
@@ -53,9 +51,10 @@ impl<Wi: HubInfo> TextGeneration<Wi> {
             ),
             ctx: ChatContext::new(config.which.info().tokenizer_repo).await?,
             config,
-            eos_token_id: eos_token,
+            eos_token_id,
         })
     }
+
 
     pub fn chat<'a>(&'a mut self, prompt: &'a str) -> impl Stream<Item = Result<String>> + 'a {
         let mut answer = String::with_capacity(1024);

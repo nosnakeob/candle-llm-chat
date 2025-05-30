@@ -38,8 +38,6 @@ pub struct HubModelInfo {
     pub model_repo: &'static str,
     pub model_file: &'static str,
     pub tokenizer_repo: &'static str,
-    // todo 从仓库中获取
-    pub eos_token: &'static str,
 }
 
 pub trait HubInfo {

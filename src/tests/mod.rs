@@ -82,12 +82,14 @@ async fn test_chat() -> Result<()> {
 #[tokio::test]
 async fn test_prompt() -> Result<()> {
     let _proxy = ProxyGuard::new("http://127.0.0.1:10808");
+
     let config = BaseConfig::<q_qwen3::Which>::default();
     println!("{config:?}");
 
     let info = config.which.info();
+
     // 初始化模型、分词器和logits处理器
-    let mut model = config.setup_model().await?;
+    let (mut model, eos_token_id) = config.setup_model().await?;
     let mut tos = TokenOutputStream::new(config.setup_tokenizer().await?);
     let mut logits_processor =
         LogitsProcessor::new(config.seed, Some(config.temperature), config.top_p);
@@ -95,7 +97,6 @@ async fn test_prompt() -> Result<()> {
 
     // 初始化上下文token列表
     let mut ctx_tokens = vec![];
-    let eos_token = tos.tokenizer().token_to_id(info.eos_token).unwrap();
 
     let prompts = vec![
         "我是snake，你给我记住了",
@@ -133,7 +134,7 @@ async fn test_prompt() -> Result<()> {
                 io::stdout().flush()?;
             }
 
-            if next_token == eos_token {
+            if next_token == eos_token_id {
                 break;
             }
         }
