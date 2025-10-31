@@ -1,6 +1,6 @@
-use crate::TextGeneration;
 use crate::config::BaseConfig;
 use crate::models::{Forward, HubInfo, q_llama, q_qwen2, q_qwen3};
+use crate::pipe::TextGeneration;
 use crate::utils::ProxyGuard;
 use crate::utils::get_user_prompt;
 use anyhow::{Error, Result};
@@ -9,7 +9,7 @@ use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::utils::apply_repeat_penalty;
 use futures_util::{StreamExt, pin_mut};
-use hf_chat_template::ChatContext;
+use crate::chat::ChatContext;
 use std::io;
 use std::io::Write;
 use tokenizers::Tokenizer;
@@ -53,7 +53,7 @@ fn gen_next_token<Wi: HubInfo>(
 }
 
 #[tokio::test]
-async fn test_chat() -> Result<()> {
+async fn test_pipeline() -> Result<()> {
     tracing_subscriber::fmt::init();
     let _proxy = ProxyGuard::new("http://127.0.0.1:10808");
 
