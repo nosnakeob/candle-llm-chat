@@ -1,45 +1,38 @@
-
-use crate::chat::ChatContext;
-use crate::config::BaseConfig;
-use crate::models::{Forward, FromGGUF, HubInfo, HubModelInfo};
-use crate::utils::load::{load_gguf, load_tokenizer};
+use crate::utils::chat::ChatContext;
+use crate::models::Forward;
+use crate::models::config::Config;
 use anyhow::{Error, Result};
 use async_stream::try_stream;
-use candle::quantized::gguf_file::Content;
-use candle::{Device, Tensor};
+use candle::Tensor;
 use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
-use candle_transformers::models::quantized_qwen2::ModelWeights;
 use candle_transformers::utils::apply_repeat_penalty;
 use futures_core::stream::Stream;
-use std::io::{Read, Seek};
-use std::ops::Deref;
-use tokenizers::Tokenizer;
 
-// 一次对话
-pub struct TextGeneration<Wi: HubInfo> {
-    model: Wi::ModelWeight,
+pub struct TextGeneration {
+    model: Box<dyn Forward>,
     tos: TokenOutputStream,
     logits_processor: LogitsProcessor,
-    config: BaseConfig<Wi>,
+    config: Config,
     eos_token_id: u32,
     ctx: ChatContext,
 }
 
-impl<Wi: HubInfo> TextGeneration<Wi> {
-    pub async fn new(config: BaseConfig<Wi>) -> Result<Self> {
+impl TextGeneration {
+    pub async fn new(config: Config) -> Result<Self> {
         let tokenizer = config.setup_tokenizer().await?;
         let (model, eos_token_id) = config.setup_model().await?;
+        let info = config.get_hub_model_info()?;
 
         Ok(Self {
             model,
             tos: TokenOutputStream::new(tokenizer),
             logits_processor: LogitsProcessor::new(
-                config.seed,
-                Some(config.temperature),
-                config.top_p,
+                config.hparams.seed,
+                Some(config.hparams.temperature),
+                config.hparams.top_p,
             ),
-            ctx: ChatContext::new(config.which.info().tokenizer_repo).await?,
+            ctx: ChatContext::new(&info.tokenizer_repo).await?,
             config,
             eos_token_id,
         })
@@ -51,15 +44,13 @@ impl<Wi: HubInfo> TextGeneration<Wi> {
 
         try_stream!({
             let prompt = self.ctx.render()?;
-            // println!("prompt: {}", prompt);
             let mut ctx_tokens = self.str2tokens(&prompt)?;
 
             let start = std::time::Instant::now();
-
             let ans_start_idx = ctx_tokens.len();
 
             // 循环生成回答
-            for index in 0..self.config.sample_len {
+            for index in 0..self.config.hparams.sample_len {
                 let next_token = if index == 0 {
                     self.gen_next_token(&ctx_tokens, 0, None)?
                 } else {
@@ -116,7 +107,6 @@ impl<Wi: HubInfo> TextGeneration<Wi> {
     ) -> Result<u32> {
         let input_arr = match ans_start_idx {
             Some(_) => &[*ctx_tokens.last().unwrap()],
-            // 首个字符
             None => &**ctx_tokens,
         };
 
@@ -127,12 +117,12 @@ impl<Wi: HubInfo> TextGeneration<Wi> {
 
         // 非首个字符应用惩罚
         if let Some(ans_start_idx) = ans_start_idx {
-            if self.config.repeat_penalty != 1. {
+            if self.config.hparams.repeat_penalty != 1. {
                 let ans_tokens = &ctx_tokens[ans_start_idx..];
-                let start_at = ans_tokens.len().saturating_sub(self.config.repeat_last_n);
+                let start_at = ans_tokens.len().saturating_sub(self.config.hparams.repeat_last_n);
                 logits = apply_repeat_penalty(
                     &logits,
-                    self.config.repeat_penalty,
+                    self.config.hparams.repeat_penalty,
                     &ans_tokens[start_at..],
                 )?;
             }

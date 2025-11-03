@@ -3,8 +3,6 @@ extern crate anyhow;
 #[macro_use]
 extern crate tracing;
 
-pub mod chat;
-pub mod config;
 pub mod models;
 pub mod pipe;
 

@@ -1,21 +1,16 @@
-use crate::config::BaseConfig;
-use crate::models::{Forward, HubInfo, q_llama, q_qwen2, q_qwen3};
+use crate::models::{Forward, config::Config};
 use crate::pipe::TextGeneration;
-use crate::utils::ProxyGuard;
-use crate::utils::get_user_prompt;
+use crate::utils::chat::ChatContext;
+use crate::utils::{ProxyGuard, get_user_prompt};
 use anyhow::{Error, Result};
 use candle::Tensor;
 use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::utils::apply_repeat_penalty;
 use futures_util::{StreamExt, pin_mut};
-use crate::chat::ChatContext;
 use std::io;
 use std::io::Write;
 use tokenizers::Tokenizer;
-
-mod quant;
-mod qwen2;
 
 fn str2tokens(string: &str, tokenizer: &Tokenizer) -> Result<Vec<u32>> {
     let tokens = tokenizer.encode(string, true).map_err(Error::msg)?;
@@ -24,12 +19,12 @@ fn str2tokens(string: &str, tokenizer: &Tokenizer) -> Result<Vec<u32>> {
     Ok(tokens)
 }
 
-fn gen_next_token<Wi: HubInfo>(
+fn gen_next_token(
     ctx_tokens: &[u32],
     idx_pos: usize,
-    model: &mut Wi::ModelWeight,
+    model: &mut Box<dyn Forward>,
     logits_processor: &mut LogitsProcessor,
-    config: &BaseConfig<Wi>,
+    config: &Config,
     ans_start_idx: Option<usize>,
 ) -> Result<u32> {
     let input = match ans_start_idx {
@@ -41,10 +36,16 @@ fn gen_next_token<Wi: HubInfo>(
     let mut logits = model.forward(&input, idx_pos)?.squeeze(0)?;
 
     if let Some(ans_start_idx) = ans_start_idx {
-        if config.repeat_penalty != 1. {
+        if config.hparams.repeat_penalty != 1. {
             let ans_tokens = &ctx_tokens[ans_start_idx..];
-            let start_at = ans_tokens.len().saturating_sub(config.repeat_last_n);
-            logits = apply_repeat_penalty(&logits, config.repeat_penalty, &ans_tokens[start_at..])?;
+            let start_at = ans_tokens
+                .len()
+                .saturating_sub(config.hparams.repeat_last_n);
+            logits = apply_repeat_penalty(
+                &logits,
+                config.hparams.repeat_penalty,
+                &ans_tokens[start_at..],
+            )?;
         }
     }
 
@@ -57,8 +58,8 @@ async fn test_pipeline() -> Result<()> {
     tracing_subscriber::fmt::init();
     let _proxy = ProxyGuard::new("7890");
 
-    let config = BaseConfig::<q_qwen2::Which>::default();
-    println!("{config:?}");
+    let config = Config::default();
+    dbg!(&config);
 
     let mut text_gen = TextGeneration::new(config).await?;
 
@@ -83,17 +84,16 @@ async fn test_pipeline() -> Result<()> {
 async fn test_prompt() -> Result<()> {
     let _proxy = ProxyGuard::new("7890");
 
-    let config = BaseConfig::<q_qwen3::Which>::default();
-    println!("{config:?}");
-
-    let info = config.which.info();
+    let config = Config::default_qwen3();
+    dbg!(&config);
+    let hparams = &config.hparams;
 
     // 初始化模型、分词器和logits处理器
     let (mut model, eos_token_id) = config.setup_model().await?;
     let mut tos = TokenOutputStream::new(config.setup_tokenizer().await?);
     let mut logits_processor =
-        LogitsProcessor::new(config.seed, Some(config.temperature), config.top_p);
-    let mut ctx = ChatContext::new(info.tokenizer_repo).await?;
+        LogitsProcessor::new(hparams.seed, Some(hparams.temperature), hparams.top_p);
+    let mut ctx = ChatContext::new(&config.model.tokenizer_repo()?).await?;
 
     // 初始化上下文token列表
     let mut ctx_tokens = vec![];
@@ -117,14 +117,22 @@ async fn test_prompt() -> Result<()> {
         let ans_start_idx = ctx_tokens.len();
 
         // 统一处理token生成和输出
-        for index in 0..config.sample_len {
+        for index in 0..hparams.sample_len {
             let next_token = gen_next_token(
                 &ctx_tokens,
-                if index == 0 { 0 } else { ans_start_idx + index - 1 },
+                if index == 0 {
+                    0
+                } else {
+                    ans_start_idx + index - 1
+                },
                 &mut model,
                 &mut logits_processor,
                 &config,
-                if index == 0 { None } else { Some(ans_start_idx) },
+                if index == 0 {
+                    None
+                } else {
+                    Some(ans_start_idx)
+                },
             )?;
             ctx_tokens.push(next_token);
 

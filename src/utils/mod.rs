@@ -1,4 +1,5 @@
 pub mod load;
+pub mod chat;
 
 use std::io::BufRead;
 use std::{env, io};

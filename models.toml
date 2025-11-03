@@ -1,0 +1,46 @@
+# 模型配置文件
+[llama]
+[llama.DeepseekR1Llama8b]
+model_repo = "lmstudio-community/DeepSeek-R1-Distill-Llama-8B-GGUF"
+model_file = "DeepSeek-R1-Distill-Llama-8B-Q4_K_M"
+tokenizer_repo = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+default = true
+
+[qwen2]
+[qwen2.W25_1_5b]
+model_repo = "Qwen/Qwen2-1.5B-Instruct-GGUF"
+model_file = "qwen2-1_5b-instruct-q4_0"
+tokenizer_repo = "Qwen/Qwen2-1.5B-Instruct"
+
+[qwen2.W25_7b]
+model_repo = "Qwen/Qwen2.5-7B-Instruct-GGUF"
+model_file = "qwen2.5-7b-instruct-q4_0"
+tokenizer_repo = "Qwen/Qwen2.5-7B-Instruct"
+default = true
+
+[qwen2.W25_14b]
+model_repo = "Qwen/Qwen2.5-14B-Instruct-GGUF"
+model_file = "qwen2.5-14b-instruct-q4_0"
+tokenizer_repo = "Qwen/Qwen2.5-14B-Instruct"
+
+[qwen3]
+[qwen3.W3_4b]
+model_repo = "Qwen/Qwen3-4B-GGUF"
+model_file = "Qwen3-4B-Q4_K_M"
+tokenizer_repo = "Qwen/Qwen3-4B"
+
+[qwen3.W3_8b]
+model_repo = "Qwen/Qwen3-8B-GGUF"
+model_file = "Qwen3-8B-Q4_K_M"
+tokenizer_repo = "Qwen/Qwen3-8B"
+default = true
+
+[qwen3.W3_14b]
+model_repo = "Qwen/Qwen3-14B-GGUF"
+model_file = "Qwen3-14B-Q4_K_M"
+tokenizer_repo = "Qwen/Qwen3-14B"
+
+[qwen3.W3_32b]
+model_repo = "Qwen/Qwen3-32B-GGUF"
+model_file = "Qwen3-32B-Q4_K_M"
+tokenizer_repo = "Qwen/Qwen3-32B"
