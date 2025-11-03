@@ -55,7 +55,7 @@ fn gen_next_token<Wi: HubInfo>(
 #[tokio::test]
 async fn test_pipeline() -> Result<()> {
     tracing_subscriber::fmt::init();
-    let _proxy = ProxyGuard::new("http://127.0.0.1:10808");
+    let _proxy = ProxyGuard::new("7890");
 
     let config = BaseConfig::<q_qwen2::Which>::default();
     println!("{config:?}");
@@ -81,7 +81,7 @@ async fn test_pipeline() -> Result<()> {
 
 #[tokio::test]
 async fn test_prompt() -> Result<()> {
-    let _proxy = ProxyGuard::new("http://127.0.0.1:10808");
+    let _proxy = ProxyGuard::new("7890");
 
     let config = BaseConfig::<q_qwen3::Which>::default();
     println!("{config:?}");

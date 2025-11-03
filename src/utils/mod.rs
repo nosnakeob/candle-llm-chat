@@ -33,9 +33,9 @@ pub fn get_user_prompt() -> String {
 pub struct ProxyGuard;
 
 impl ProxyGuard {
-    pub fn new(proxy: &str) -> Self {
+    pub fn new(port: &str) -> Self {
         unsafe {
-            env::set_var("HTTPS_PROXY", proxy);
+            env::set_var("HTTPS_PROXY", format!("http://127.0.0.1:{port}"));
         }
         Self
     }
