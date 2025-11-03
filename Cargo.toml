@@ -1,6 +1,6 @@
 [package]
 name = "hf-llm-chat"
-version = "0.3.1"
+version = "0.4.1"
 edition = "2024"
 
 [lints.rust]
@@ -8,18 +8,18 @@ unused = "allow"
 
 [dependencies]
 anyhow = "1.0"
-tokio = "1.45"
+tokio = "1.48"
 # intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"] }
 
-candle = { package = "candle-core", git = "https://github.com/huggingface/candle.git" }
-candle-nn = { git = "https://github.com/huggingface/candle.git" }
+candle = { package = "candle-core", version = "0.9.2-alpha.1" }
+candle-nn = "0.9.2-alpha.1"
 # feat mkl STATUS_DLL_NOT_FOUND
-candle-transformers = { git = "https://github.com/huggingface/candle.git", features = [
+candle-transformers = { version = "0.9.2-alpha.1", features = [
     "cuda",
     "cudnn",
-    "flash-attn",
+    # "flash-attn",
 ] }
-candle-examples = { git = "https://github.com/huggingface/candle.git" }
+candle-examples = "0.9.2-alpha.1"
 
 hf-hub = { version = "0.4", features = ["tokio"] }
 tokenizers = "0.21"
@@ -30,7 +30,7 @@ futures-util = "0.3"
 
 tracing = "0.1"
 
-which = "7.0"
+which = "8.0"
 
 config = "0.15"
 serde_json = "1.0"
