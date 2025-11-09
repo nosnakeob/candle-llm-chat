@@ -66,31 +66,6 @@ pub async fn download_gguf(repo: &str, filename: &str) -> Result<PathBuf> {
     }
 }
 
-pub async fn load_gguf(repo: &str, filename: &str) -> Result<(File, Content)> {
-    let model_path = download_gguf(repo, filename).await?;
-
-    let mut file = File::open(&model_path)?;
-    let start = std::time::Instant::now();
-
-    // 构建模型
-    let ct = Content::read(&mut file).map_err(|e| e.with_path(&model_path))?;
-    let mut total_size_in_bytes = 0;
-    for (_, tensor) in ct.tensor_infos.iter() {
-        let elem_count = tensor.shape.elem_count();
-        total_size_in_bytes +=
-            elem_count * tensor.ggml_dtype.type_size() / tensor.ggml_dtype.block_size();
-    }
-    let formatted_size = format_size(total_size_in_bytes);
-    info!(
-        "loaded {:?} tensors ({}) in {:.2}s",
-        ct.tensor_infos.len(),
-        &formatted_size,
-        start.elapsed().as_secs_f32(),
-    );
-
-    Ok((file, ct))
-}
-
 pub async fn load_tokenizer(repo: &str) -> Result<Tokenizer> {
     let config = config::Config::builder()
         .add_source(config::File::with_name("config.toml"))
@@ -105,4 +80,40 @@ pub async fn load_tokenizer(repo: &str) -> Result<Tokenizer> {
         .await?;
 
     Tokenizer::from_file(pth).map_err(Error::msg)
+}
+
+mod tests {
+    use super::*;
+    use crate::utils::log_tensor_size;
+    use serde_json::Value;
+    use std::io::BufReader;
+
+    #[tokio::test]
+    async fn t() -> Result<()> {
+        tracing_subscriber::fmt::init();
+
+        let model_path = download_gguf("Qwen/Qwen3-8B-GGUF", "Qwen3-8B-Q4_K_M").await?;
+
+        let mut file = File::open(&model_path)?;
+
+        // 构建模型
+        let ct = Content::read(&mut file)?;
+
+        let pth = Api::new()?
+            .model("Qwen/Qwen3-8B".to_string())
+            .get("tokenizer_config.json")
+            .await?;
+        let file = File::open(pth)?;
+        let mut json: Value = serde_json::from_reader(BufReader::new(file))?;
+        dbg!(json["chat_template"].take().as_str().unwrap());
+
+        // dbg!(&ct.metadata.keys());
+
+        // dbg!(ct.metadata.get("tokenizer.ggml.eos_token_id").unwrap());
+        dbg!(ct.metadata.get("tokenizer.chat_template").unwrap());
+
+        log_tensor_size(&ct);
+
+        Ok(())
+    }
 }

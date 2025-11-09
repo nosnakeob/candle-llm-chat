@@ -6,13 +6,14 @@ use std::io::{Read, Seek};
 
 pub mod config;
 pub mod registry;
+pub mod hub;
 
 /// 实现模型 trait 的宏
 macro_rules! impl_model_traits {
     // 支持多个模块标识符，自动添加 ::ModelWeights
     ($($module:ident),+ $(,)?) => {
         $(
-            impl crate::models::Forward for $module::ModelWeights {
+            impl crate::model::Forward for $module::ModelWeights {
                 fn forward(
                     &mut self,
                     x: &candle::Tensor,

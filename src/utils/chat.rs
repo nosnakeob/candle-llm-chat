@@ -74,12 +74,7 @@ impl ChatContext {
             .as_str()
             .unwrap()
             .to_string();
-        Ok(Self {
-            messages: vec![],
-            add_generation_prompt: true,
-            enable_thinking: false,
-            template: TEMPLATE_ENV.template_from_str(Box::leak(template_str.into_boxed_str()))?,
-        })
+        Self::from_template(&template_str)
     }
 
     /// 从模板字符串创建ChatContext
@@ -180,10 +175,13 @@ mod tests {
         ctx.push_msg("hello");
         ctx.push_msg("hi");
 
-        assert_eq!(ctx.render()?,r#"
+        assert_eq!(
+            ctx.render()?,
+            r#"
 <|user|>hello<|end|>
 <|assistant|>hi<|end|>
-<|assistant|>"#);
+<|assistant|>"#
+        );
         Ok(())
     }
 

@@ -1,8 +1,10 @@
-pub mod load;
 pub mod chat;
+pub mod load;
 
+use candle::quantized::gguf_file::Content;
 use std::io::BufRead;
 use std::{env, io};
+use tracing::info;
 
 pub fn format_size(size_in_bytes: usize) -> String {
     if size_in_bytes < 1_000 {
@@ -48,4 +50,20 @@ impl Drop for ProxyGuard {
             env::remove_var("HTTPS_PROXY");
         }
     }
+}
+
+/// 计算并记录 GGUF 文件中张量的总大小信息
+pub fn log_tensor_size(ct: &Content) {
+    let mut total_size_in_bytes = 0;
+    for (_, tensor) in ct.tensor_infos.iter() {
+        let elem_count = tensor.shape.elem_count();
+        total_size_in_bytes +=
+            elem_count * tensor.ggml_dtype.type_size() / tensor.ggml_dtype.block_size();
+    }
+    let formatted_size = format_size(total_size_in_bytes);
+    info!(
+        "loaded {:?} tensors ({})",
+        ct.tensor_infos.len(),
+        &formatted_size
+    );
 }
