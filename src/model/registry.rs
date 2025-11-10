@@ -21,12 +21,12 @@ impl ModelRegistry {
     }
 
     /// 获取模型配置
-    /// 
+    ///
     /// # 参数
     /// - `model_id`: 模型标识符
     ///   - 格式1: "qwen2.W25_14b" - 获取特定模型
     ///   - 格式2: "qwen2" - 获取默认模型
-    /// 
+    ///
     /// # 示例
     /// ```
     /// let registry = ModelRegistry::load()?;
@@ -34,22 +34,9 @@ impl ModelRegistry {
     /// let default = registry.get("qwen2")?;           // 默认模型
     /// ```
     pub fn get(&self, model_id: &str) -> Option<&HubInfo> {
-        // 解析模型ID
-        let parts: Vec<&str> = model_id.split('.').collect();
-        
-        match parts.len() {
-            // 格式: "qwen2" - 获取默认模型
-            1 => {
-                let arch = parts[0];
-                self.get_default_by_arch(arch)
-            }
-            // 格式: "qwen2.W25_14b" - 获取特定模型
-            2 => {
-                let arch = parts[0];
-                let variant = parts[1];
-                self.get_by_arch_and_variant(arch, variant)
-            }
-            _ => None,
+        match model_id.split_once('.') {
+            Some((arch, variant)) => self.get_by_arch_and_variant(arch, variant),
+            None => self.get_default_by_arch(model_id),
         }
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "hf-llm-chat"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 
 [lints.rust]
@@ -36,6 +36,7 @@ config = "0.15"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 derive-new = "0.7"
+strum = { version = "0.27", features = ["derive"] }
 minijinja = { version = "2.12", features = ["loader"] }
 minijinja-contrib = { version = "2.12", features = ["pycompat"] }
 

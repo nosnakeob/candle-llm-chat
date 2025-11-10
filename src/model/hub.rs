@@ -1,10 +1,11 @@
 use crate::utils::load::download_gguf;
-use anyhow::{Error, Result};
+use anyhow::Result;
 use candle::quantized::gguf_file::Content;
 use derive_new::new;
 use hf_hub::api::tokio::ApiBuilder;
 use serde::Deserialize;
 use std::path::PathBuf;
+use strum::{Display, EnumString};
 use tokenizers::Tokenizer;
 
 #[derive(Debug, Deserialize, Clone, new)]
@@ -38,7 +39,8 @@ impl HubInfo {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EnumString, Display)]
+#[strum(serialize_all = "lowercase")]
 pub enum ModelArch {
     Qwen2,
     Qwen3,
@@ -67,17 +69,12 @@ impl TryFrom<&Content> for ModelInfo {
             .unwrap()
             .to_string()?
             .clone();
-        let arch = ct
+        let arch_str = ct
             .metadata
             .get("general.architecture")
             .unwrap()
             .to_string()?;
-        let arch = match arch.as_str() {
-            "qwen2" => ModelArch::Qwen2,
-            "qwen3" => ModelArch::Qwen3,
-            "llama" => ModelArch::Llama,
-            _ => return Err(Error::msg("Unknown model architecture")),
-        };
+        let arch: ModelArch = arch_str.parse()?;
         Ok(Self {
             eos_token_id,
             chat_template,
