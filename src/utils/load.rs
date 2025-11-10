@@ -1,4 +1,3 @@
-use crate::utils::format_size;
 use anyhow::{Error, Result};
 use candle::quantized::gguf_file::Content;
 use candle_transformers::generation::{LogitsProcessor, Sampling};

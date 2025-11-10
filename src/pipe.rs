@@ -152,10 +152,9 @@ mod tests {
     use crate::model::Forward;
     use crate::pipe::TextGeneration;
     use crate::utils::chat::ChatContext;
-    use crate::utils::{ProxyGuard, get_user_prompt};
+    use crate::utils::{get_user_prompt, proxy::ProxyGuard};
     use anyhow::{Error, Result};
     use candle::Tensor;
-    use candle_examples::token_output_stream::TokenOutputStream;
     use candle_transformers::generation::LogitsProcessor;
     use candle_transformers::utils::apply_repeat_penalty;
     use futures_util::{StreamExt, pin_mut};

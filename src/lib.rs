@@ -5,5 +5,4 @@ extern crate tracing;
 
 pub mod model;
 pub mod pipe;
-
-mod utils;
+pub mod utils;

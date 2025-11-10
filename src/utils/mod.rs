@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod load;
+pub mod proxy;
 
 use candle::quantized::gguf_file::Content;
 use std::io::BufRead;
@@ -31,25 +32,6 @@ pub fn get_user_prompt() -> String {
     line = line.trim().to_string();
 
     line
-}
-
-pub struct ProxyGuard;
-
-impl ProxyGuard {
-    pub fn new(port: &str) -> Self {
-        unsafe {
-            env::set_var("HTTPS_PROXY", format!("http://127.0.0.1:{port}"));
-        }
-        Self
-    }
-}
-
-impl Drop for ProxyGuard {
-    fn drop(&mut self) {
-        unsafe {
-            env::remove_var("HTTPS_PROXY");
-        }
-    }
 }
 
 /// 计算并记录 GGUF 文件中张量的总大小信息
