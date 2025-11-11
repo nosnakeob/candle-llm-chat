@@ -5,20 +5,20 @@
 
 ## ✨ 功能特性
 
--   **多模型支持**: 支持 Qwen2/Qwen3/Llama 系列模型，通过 `models.toml` 配置文件管理
--   **简洁的 API**: 基于字符串标识符的模型选择，支持 `"qwen3"` 或 `"qwen3.W3_14b"` 格式
--   **流式输出**: 实现打字机效果的实时响应，提升用户体验
--   **GPU 加速**: 支持 CUDA，可利用 NVIDIA GPU 进行高效推理
--   **异步处理**: 基于 Tokio 的异步设计，确保应用性能
--   **智能聊天上下文**: 自动角色切换和思考过程过滤的 `ChatContext` 管理
--   **配置灵活**: 通过 `InferenceConfig` 结构体和 TOML 文件轻松调整模型参数
+- **多模型支持**: 支持 Qwen2/Qwen3/Llama 系列模型，通过 `models.toml` 配置文件管理
+- **简洁的 API**: 基于字符串标识符的模型选择，支持 `"qwen3"` 或 `"qwen3.W3_14b"` 格式
+- **流式输出**: 实现打字机效果的实时响应，提升用户体验
+- **GPU 加速**: 支持 CUDA，可利用 NVIDIA GPU 进行高效推理
+- **异步处理**: 基于 Tokio 的异步设计，确保应用性能
+- **智能聊天上下文**: 自动角色切换和思考过程过滤的 `ChatContext` 管理
+- **配置灵活**: 通过 `InferenceConfig` 结构体和 TOML 文件轻松调整模型参数
 
 ## 🚀 快速开始
 
 ### 1. 环境要求
 
--   Rust 工具链 (推荐最新稳定版)
--   CUDA 工具包 (若需使用 GPU 加速)
+- Rust 工具链 (推荐最新稳定版)
+- CUDA 工具包 (若需使用 GPU 加速)
 
 ### 2. 下载与运行
 
@@ -43,11 +43,13 @@ let _proxy = ProxyGuard::new("7890"); // 端口号，完整地址为 http://127.
 ### 3. 运行测试
 
 **交互式聊天测试**：
+
 ```bash
 cargo test --package candle-llm-chat --lib pipe::tests::test_pipeline -- --nocapture
 ```
 
 **预设对话测试**：
+
 ```bash
 cargo test --package candle-llm-chat --lib pipe::tests::test_prompt -- --nocapture
 ```
@@ -59,7 +61,7 @@ cargo test --package candle-llm-chat --lib pipe::tests::test_prompt -- --nocaptu
 项目支持多种预配置模型，在 `models.toml` 中定义：
 
 - **Qwen2 系列**: 1.5B, 7B, 14B 参数模型
-- **Qwen3 系列**: 4B, 8B, 14B, 32B 参数模型  
+- **Qwen3 系列**: 4B, 8B, 14B, 32B 参数模型
 - **Llama 系列**: 包含 DeepSeek-R1-Distill-Llama-8B
 
 默认使用 Qwen3-8B 模型，可通过模型标识符切换：
@@ -117,15 +119,15 @@ use futures_util::{StreamExt, pin_mut};
 async fn main() -> anyhow::Result<()> {
     // 使用默认配置 (Qwen3-8B)
     let mut text_gen = TextGeneration::default().await?;
-    
+
     // 流式聊天
     let stream = text_gen.chat("你好，请介绍一下自己");
     pin_mut!(stream);
-    
+
     while let Some(Ok(token)) = stream.next().await {
         print!("{}", token);
     }
-    
+
     Ok(())
 }
 ```
@@ -138,7 +140,7 @@ use candle_llm_chat::pipe::TextGeneration;
 // 使用 Qwen2 默认模型 (7B)
 let text_gen = TextGeneration::with_default_config("qwen2").await?;
 
-// 使用 Qwen3-14B 模型  
+// 使用 Qwen3-14B 模型
 let text_gen = TextGeneration::with_default_config("qwen3.W3_14b").await?;
 
 // 使用 DeepSeek-R1-Llama-8B 模型
@@ -161,30 +163,21 @@ let mut text_gen = TextGeneration::new("qwen3", config).await?;
 
 ## 📦 GGUF 模型与分片处理
 
-本项目支持 GGUF 格式的模型。对于分片的 GGUF 模型文件，需要使用 `llama-gguf-split` 工具进行合并。
+本项目支持 GGUF 格式的模型。对于分片的 GGUF 模型文件，需要使用 `gguf-utils` 工具进行合并。
 
-### 依赖: `llama-gguf-split`
+### 依赖: `gguf-utils`
 
-`llama-gguf-split` 是一个外部运行时依赖。如果需要加载分片模型，请确保已按照以下步骤安装并将其添加到系统 PATH：
+`gguf-utils` 是一个外部运行时依赖。如果需要加载分片模型，请确保已安装：
 
-1.  克隆 `llama.cpp` 仓库:
-    ```bash
-    git clone --recursive https://github.com/ggerganov/llama.cpp
-    ```
-2.  编译安装:
-    ```bash
-    cd llama.cpp
-    cmake -S . -B build
-    cmake --build build --config Release
-    ```
-3.  将生成的可执行文件 (通常在 `build/bin` 目录下) 添加到系统 PATH。
+```bash
+cargo install gguf-utils
+```
+
+安装后，`gguf-utils` 命令将自动添加到系统 PATH。
 
 ### 自动合并
 
-程序在下载模型时，如果检测到模型文件是分片的，会自动调用 `llama-gguf-split` 进行合并。合并后的完整模型文件将保存在与分片文件相同的目录下。
-
-参考资料:
-- [How to use the gguf-split / Model sharding demo](https://github.com/ggml-org/llama.cpp/discussions/6404)
+程序在下载模型时，如果检测到模型文件是分片的，会自动调用 `gguf-utils merge` 进行合并。合并后的完整模型文件将保存在与分片文件相同的目录下。
 
 ## 🏗️ 项目架构
 
@@ -193,13 +186,13 @@ graph TB
     subgraph "用户交互层"
         A[用户输入] --> B[TextGeneration::chat]
     end
-    
+
     subgraph "配置管理层"
         MR[ModelRegistry<br/>模型注册表] --> HI[HubInfo<br/>模型仓库信息]
         MT[models.toml] --> MR
         HI --> ML[ModelLoader<br/>模型加载器]
     end
-    
+
     subgraph "核心组件"
         C[ChatContext<br/>聊天上下文管理] --> TG[TextGeneration<br/>文本生成管道]
         ML --> TG
@@ -207,38 +200,38 @@ graph TB
         F[TokenOutputStream<br/>Token流处理] --> TG
         G[LogitsProcessor<br/>采样处理] --> TG
     end
-    
+
     subgraph "模型抽象层"
         FW[Forward Trait<br/>统一推理接口] --> MW[ModelWeights实现]
         MW --> MW1[quantized_qwen2::ModelWeights]
         MW --> MW2[quantized_qwen3::ModelWeights]
         MW --> MW3[quantized_llama::ModelWeights]
     end
-    
+
     subgraph "模型实现层"
         MW1 --> H1[Qwen2 GGUF模型文件]
         MW2 --> H2[Qwen3 GGUF模型文件]
         MW3 --> H3[Llama GGUF模型文件]
         I[Tokenizer<br/>分词器] --> TG
     end
-    
+
     subgraph "底层框架"
         K[Candle Framework<br/>机器学习框架]
         L[CUDA Support<br/>GPU加速]
         M[HuggingFace Hub<br/>模型仓库]
     end
-    
+
     subgraph "工具组件"
         N[ProxyGuard<br/>代理设置] --> M
-        O[llama-gguf-split<br/>模型分片合并] --> H1
+        O[gguf-utils<br/>模型分片合并] --> H1
         O --> H2
         O --> H3
     end
-    
+
     B --> C
     TG --> P[Stream Output<br/>流式输出]
     P --> Q[实时响应显示]
-    
+
     H1 --> M
     H2 --> M
     H3 --> M
@@ -247,7 +240,7 @@ graph TB
     MW2 --> K
     MW3 --> K
     K --> L
-    
+
     style MR fill:#fff3e0
     style HI fill:#e3f2fd
     style FW fill:#f1f8e9
@@ -261,12 +254,14 @@ graph TB
 #### 核心设计模式
 
 **1. 简化的配置系统**
+
 - `ModelRegistry`: 从 `models.toml` 加载模型配置的注册表系统
 - `HubInfo`: 包含模型仓库、文件名和分词器仓库的配置结构
 - `InferenceConfig`: 推理参数配置，包含温度、采样长度等
 - `ModelLoader`: 统一的模型加载器，负责加载模型、分词器和元数据
 
 **2. 模型标识符系统**
+
 ```rust
 // 支持两种格式：
 // 1. 架构名 - 使用该架构的默认模型
@@ -277,6 +272,7 @@ let text_gen = TextGeneration::with_default_config("qwen3.W3_14b").await?;
 ```
 
 **3. 统一推理接口**
+
 ```rust
 pub trait Forward {
     fn forward(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor>;
@@ -287,6 +283,7 @@ impl_model_traits!(quantized_llama, quantized_qwen2, quantized_qwen3);
 ```
 
 #### 核心流程
+
 1. **配置加载** → `ModelRegistry` 从 `models.toml` 读取模型配置
 2. **模型选择** → 通过字符串标识符 (如 `"qwen3"` 或 `"qwen3.W3_14b"`) 选择模型
 3. **异步加载** → `ModelLoader::load()` 异步加载 GGUF 模型、分词器和元数据
@@ -294,6 +291,7 @@ impl_model_traits!(quantized_llama, quantized_qwen2, quantized_qwen3);
 5. **流式输出** → `TextGeneration::chat()` 返回异步流
 
 #### 关键组件
+
 - **ModelRegistry**: TOML 配置文件驱动的模型注册表，支持默认模型和变体选择
 - **HubInfo**: 封装 HuggingFace 模型仓库信息，负责下载模型和分词器
 - **ModelLoader**: 统一的模型加载器，返回 `(Box<dyn Forward>, Tokenizer, ModelInfo)` 元组
@@ -304,6 +302,7 @@ impl_model_traits!(quantized_llama, quantized_qwen2, quantized_qwen3);
 - **宏系统**: `impl_model_traits!` 自动为模型实现必要 trait
 
 #### 技术特性
+
 - 🎯 **简洁 API**: 基于字符串的模型选择，无需复杂的枚举类型
 - 🔧 **配置驱动**: 通过 TOML 文件管理模型，易于扩展新模型
 - 🔄 **异步优先**: 全异步设计，模型加载和推理均为异步
@@ -339,6 +338,7 @@ src/
 添加新模型只需要两步：
 
 1. **在 `models.toml` 中添加配置**：
+
 ```toml
 [qwen3.W3_72b]
 model_repo = "Qwen/Qwen3-72B-GGUF"
@@ -347,11 +347,13 @@ tokenizer_repo = "Qwen/Qwen3-72B"
 ```
 
 2. **在代码中使用**：
+
 ```rust
 let text_gen = TextGeneration::with_default_config("qwen3.W3_72b").await?;
 ```
 
 对于新的模型架构，需要：
+
 - 在 `models.toml` 中添加新的架构部分 (如 `[new_arch.variant]`)
 - 在 `ModelLoader::load()` 中添加对应的加载逻辑
 - 确保 Candle 框架支持该模型架构

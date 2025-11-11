@@ -5,6 +5,7 @@ use config;
 use futures_util::future::try_join_all;
 use hf_hub::api::tokio::ApiBuilder;
 use hf_hub::{Cache, Repo, api::tokio::Api};
+use regex::Regex;
 use std::{fs::File, path::PathBuf, process::Command};
 use tokenizers::Tokenizer;
 
@@ -45,23 +46,30 @@ pub async fn download_gguf(repo: &str, filename: &str) -> Result<PathBuf> {
 
         let download_dir = split_paths[0].parent().unwrap();
 
-        let merged_path = download_dir.join(&filename_with_ext);
+        let merge_path = download_dir.join(format!("{filename}*"));
 
-        // 合并分片
-        let output = Command::new(which::which("llama-gguf-split")?)
-            .arg("--merge")
-            .arg(split_paths[0].to_str().unwrap())
-            .arg(merged_path.to_str().unwrap())
+        let output = Command::new("gguf-utils")
+            .arg("merge")
+            .arg(merge_path)
+            .arg("-o")
+            .arg(download_dir)
             .output()?;
 
-        if !output.status.success() {
-            bail!(
-                "llama-gguf-split failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-        }
+        let stdout = String::from_utf8(output.stdout)?;
 
-        Ok(merged_path)
+        let re = Regex::new(r"\|\s*([^\|]+\.gguf)\s*\|")?;
+
+        let merged_path = re
+            .captures(&stdout)
+            .and_then(|cap| cap.get(1))
+            .map(|m| m.as_str().trim())
+            .ok_or_else(|| anyhow!("Failed to extract file path from output"))?;
+
+        // 重命名文件
+        let new_path = download_dir.join(&filename_with_ext);
+        std::fs::rename(merged_path, &new_path)?;
+
+        Ok(new_path)
     }
 }
 
@@ -83,15 +91,20 @@ pub async fn load_tokenizer(repo: &str) -> Result<Tokenizer> {
 
 mod tests {
     use super::*;
-    use crate::utils::log_tensor_size;
+    use crate::model::registry::ModelRegistry;
+    use crate::utils::{log_tensor_size, proxy::ProxyGuard};
+    use candle_transformers::models::hiera;
     use serde_json::Value;
     use std::io::BufReader;
 
     #[tokio::test]
-    async fn t() -> Result<()> {
+    async fn test_load_gguf() -> Result<()> {
         tracing_subscriber::fmt::init();
 
-        let model_path = download_gguf("Qwen/Qwen3-8B-GGUF", "Qwen3-8B-Q4_K_M").await?;
+        let registry = ModelRegistry::load()?;
+        let hub_info = registry.get("qwen3").unwrap();
+
+        let model_path = download_gguf(&hub_info.model_repo, &hub_info.model_file).await?;
 
         let mut file = File::open(&model_path)?;
 
@@ -99,17 +112,12 @@ mod tests {
         let ct = Content::read(&mut file)?;
 
         let pth = Api::new()?
-            .model("Qwen/Qwen3-8B".to_string())
+            .model(hub_info.tokenizer_repo.to_string())
             .get("tokenizer_config.json")
             .await?;
         let file = File::open(pth)?;
         let mut json: Value = serde_json::from_reader(BufReader::new(file))?;
-        dbg!(json["chat_template"].take().as_str().unwrap());
-
-        // dbg!(&ct.metadata.keys());
-
-        // dbg!(ct.metadata.get("tokenizer.ggml.eos_token_id").unwrap());
-        dbg!(ct.metadata.get("tokenizer.chat_template").unwrap());
+        dbg!(&ct.metadata.keys());
 
         log_tensor_size(&ct);
 
