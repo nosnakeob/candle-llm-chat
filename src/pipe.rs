@@ -200,7 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prompt() -> Result<()> {
-        let _proxy = ProxyGuard::new("7890");
+        let _proxy = ProxyGuard::new(7890);
 
         let (mut model, tokenizer, model_info) =
             ModelLoader::load("qwen3", &candle::Device::cuda_if_available(0)?).await?;
@@ -289,7 +289,7 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline() -> Result<()> {
         tracing_subscriber::fmt::init();
-        let _proxy = ProxyGuard::new("7890");
+        let _proxy = ProxyGuard::new(7890);
 
         let mut text_gen = TextGeneration::default().await?;
 
