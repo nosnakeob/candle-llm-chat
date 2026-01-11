@@ -1,6 +1,6 @@
 use anyhow::{Error, Result, bail};
 use derive_new::new;
-use hf_hub::api::tokio::Api;
+use hf_hub::api::tokio::{Api, ApiBuilder};
 use minijinja::{Environment, Template};
 use minijinja_contrib::pycompat;
 use serde::Serialize;
@@ -18,7 +18,8 @@ static TEMPLATE_ENV: LazyLock<Environment> = LazyLock::new(|| {
 });
 
 pub async fn load_template(tokenizer_repo: &str) -> Result<Value> {
-    let pth = Api::new()?
+    let pth = ApiBuilder::from_env()
+        .build()?
         .model(tokenizer_repo.to_string())
         .get("tokenizer_config.json")
         .await?;
@@ -68,7 +69,7 @@ impl DerefMut for ChatContext {
 
 impl ChatContext {
     /// 从tokenizer repo创建ChatContext
-    pub async fn new(tokenizer_repo: &str) -> Result<Self> {
+    pub async fn from_repo(tokenizer_repo: &str) -> Result<Self> {
         let template_str = load_template(&tokenizer_repo)
             .await?
             .as_str()
@@ -127,7 +128,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_push_msg() -> Result<()> {
-        let mut ctx = ChatContext::new("Qwen/Qwen2.5-7B-Instruct").await?;
+        let mut ctx = ChatContext::from_repo("Qwen/Qwen3-4B-Instruct-2507").await?;
         ctx.push_msg("hello");
         ctx.push_msg("hi");
         ctx.push_msg("how are you");
@@ -145,7 +146,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_manual_push() -> Result<()> {
-        let mut ctx = ChatContext::new("Qwen/Qwen2.5-7B-Instruct").await?;
+        let mut ctx = ChatContext::from_repo("Qwen/Qwen3-4B-Instruct-2507").await?;
         ctx.push_message(Role::System, "You are a helpful assistant");
         ctx.push_message(Role::User, "hello");
         ctx.push_message(Role::Assistant, "hi there!");
@@ -154,6 +155,17 @@ mod tests {
         assert_eq!(ctx.messages[0].role, Role::System);
         assert_eq!(ctx.messages[1].role, Role::User);
         assert_eq!(ctx.messages[2].role, Role::Assistant);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_from_repo() -> Result<()> {
+        let mut ctx = ChatContext::from_repo("Qwen/Qwen3-4B-Instruct-2507").await?;
+        ctx.push_msg("hello");
+        ctx.push_msg("hi");
+
+        dbg!(ctx.render()?);
+
         Ok(())
     }
 
@@ -187,7 +199,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_thinking_content() -> Result<()> {
-        let mut ctx = ChatContext::new("Qwen/Qwen2.5-7B-Instruct").await?;
+        let mut ctx = ChatContext::from_repo("Qwen/Qwen3-4B-Instruct-2507").await?;
         ctx.push_msg("hello");
         ctx.push_msg("<think>let me think about this</think>hi there!");
 
