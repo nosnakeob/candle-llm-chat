@@ -4,14 +4,14 @@
 
 ## ✨ 特性
 
-- 🎯 **简洁 API**: 字符串标识符选择模型 `"qwen3"` / `"qwen3.W3_14b"`
+- 🎯 **简洁 API**: 字符串标识符选择模型 `"qwen3"` / `"qwen3.8b_q4"`
 - 🤖 **多模型支持**: Qwen3/Llama 系列，通过 `models.toml` 配置
 - 📦 **双格式支持**: GGUF 量化模型 + Safetensors 完整模型
 - 📡 **流式输出**: 实时打字机效果
 - 🚀 **GPU 加速**: CUDA 支持
 - ⚡ **异步设计**: 基于 Tokio
 - 🧠 **智能上下文**: 自动角色切换和思考过程过滤
-- 🌍 **环境变量配置**: 支持 `HF_ENDPOINT`、`HF_TOKEN` 等环境变量
+- 🌍 **智能配置**: tokenizer_repo 自动填充，约定优于配置
 
 ## 🚀 快速开始
 
@@ -86,10 +86,10 @@ echo $HF_TOKEN
 use candle_llm_chat::pipe::TextGeneration;
 use futures_util::{StreamExt, pin_mut};
 
-// 使用默认模型 (Qwen3-8B)
+// 使用默认模型 (qwen3.4b_base)
 let mut text_gen = TextGeneration::default().await?;
 
-let stream = text_gen.chat("你好");
+let stream = text_gen.chat("你好，请介绍一下自己");
 pin_mut!(stream);
 
 while let Some(Ok(token)) = stream.next().await {
@@ -133,13 +133,13 @@ let _proxy = ProxyGuard::new(7890); // 自动清理的代理设置
 let text_gen = TextGeneration::with_default_config("qwen3").await?;
 
 // 使用 GGUF 量化模型
-let text_gen = TextGeneration::with_default_config("qwen3.W3_14b").await?;
+let text_gen = TextGeneration::with_default_config("qwen3.8b_q4").await?;
 
 // 使用 Safetensors 完整模型
-let text_gen = TextGeneration::with_default_config("qwen3.W3_8b_full").await?;
+let text_gen = TextGeneration::with_default_config("qwen3.8b_base").await?;
 
-// 使用 Llama 模型
-let text_gen = TextGeneration::with_default_config("llama.DeepseekR1Llama8b").await?;
+// 使用自定义模型
+let text_gen = TextGeneration::with_default_config("qwen3.4b_abliterated").await?;
 ```
 
 ### 自定义推理参数
@@ -160,21 +160,35 @@ let mut text_gen = TextGeneration::new("qwen3", config).await?;
 **`models.toml`** - 模型仓库配置：
 
 ```toml
-# GGUF 量化模型（默认）
-[qwen3.W3_8b]
-model_repo = "Qwen/Qwen3-8B-GGUF"
-model_file = "Qwen3-8B-Q4_K_M"
-tokenizer_repo = "Qwen/Qwen3-8B"  # 可选，未配置时自动使用 model_repo
-default = true
+# 架构级配置
+[qwen3]
 
-# Safetensors 完整模型 - tokenizer_repo 未配置时自动使用 model_repo
-[qwen3.W3_8b_full]
-model_repo = "Qwen/Qwen3-8B"
-model_file = "model.safetensors"
-model_type = "safetensors"
+# 基础模型 (Safetensors)
+[qwen3.4b_base]
+model_repo = "Qwen/Qwen3-4B-Instruct-2507"
+default = true  # 架构默认模型
+
+# 量化模型 (GGUF)
+[qwen3.4b_q4]
+model_repo = "byteshape/Qwen3-4B-Instruct-2507-GGUF"
+model_file = "Qwen3-4B-Instruct-2507-Q4_K_S-3.66bpw.gguf"
+# tokenizer_repo 会自动从对应 base 模型获取
+
+# 自定义模型
+[qwen3.4b_abliterated]
+model_repo = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
+tokenizer_repo = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
 ```
 
-> **注意**: 项目现在使用环境变量进行配置，不再需要 `config.toml` 文件。HuggingFace Token 等配置请通过环境变量设置。
+### 智能配置特性
+
+- **自动格式识别**: 仓库名包含 "GGUF" 自动识别为量化模型
+- **tokenizer_repo 自动填充**:
+  - base 模型：自动使用 model_repo
+  - 其他变体：自动从对应 base 模型获取
+- **约定优于配置**: 遵循 `架构.大小_变体` 命名规范
+
+> **注意**: 项目现在使用环境变量进行配置，不再需要 `config.toml` 文件。HuggingFace Token 等配置请通过环境变量设置。模型配置通过 `models.toml` 管理，支持智能的 tokenizer_repo 自动填充。
 
 ## 🏗️ 项目架构
 
@@ -199,14 +213,14 @@ graph TB
     end
 
     subgraph "模型抽象层"
-        FW[Forward Trait<br/>统一推理接口] --> MW[ModelWeights实现]
+        FW[ModelInference Trait<br/>统一推理接口] --> MW[ModelWeights实现]
         MW --> MW1[quantized_qwen3::ModelWeights]
-        MW --> MW2[quantized_llama::ModelWeights]
+        MW --> MW2[qwen3::ModelForCausalLM]
     end
 
     subgraph "模型实现层"
         MW1 --> H1[Qwen3 GGUF模型文件]
-        MW2 --> H2[Llama GGUF模型文件]
+        MW2 --> H2[Qwen3 Safetensors模型文件]
         I[Tokenizer<br/>分词器] --> TG
     end
 
@@ -243,11 +257,13 @@ graph TB
 
 ### 核心设计
 
-**配置驱动**: 通过 `models.toml` 管理模型，字符串标识符选择 (`"qwen3"` 或 `"qwen3.W3_14b"`)
+**配置驱动**: 通过 `models.toml` 管理模型，字符串标识符选择 (`"qwen3"` 或 `"qwen3.8b_q4"`)
 
-**统一接口**: `Forward` trait 抽象所有模型推理，通过宏自动实现
+**统一接口**: `ModelInference` trait 抽象所有模型推理，通过宏自动实现
 
 **异步优先**: 模型加载和推理全异步，基于 Tokio 和 async-stream
+
+**智能配置**: tokenizer_repo 自动填充，约定优于配置的设计理念
 
 ## 扩展新模型
 
@@ -256,30 +272,55 @@ graph TB
 **GGUF 量化模型：**
 
 ```toml
-[qwen3.W3_72b]
-model_repo = "Qwen/Qwen3-72B-GGUF"
-model_file = "Qwen3-72B-Q4_K_M"
-tokenizer_repo = "Qwen/Qwen3-72B"
+[qwen3.32b_q4]
+model_repo = "Qwen/Qwen3-32B-GGUF"
+model_file = "Qwen3-32B-Q4_K_M.gguf"
+# tokenizer_repo 会自动从 qwen3.32b_base 获取
 ```
 
 **Safetensors 完整模型：**
 
 ```toml
-[qwen3.W3_4b_full]
-model_repo = "Qwen/Qwen3-4B"
-model_file = "model.safetensors"
-tokenizer_repo = "Qwen/Qwen3-4B"
-model_type = "safetensors"
+[qwen3.32b_base]
+model_repo = "Qwen/Qwen3-32B"
+# model_file 默认为 "model.safetensors"
+# tokenizer_repo 自动使用 model_repo
 ```
 
 然后直接使用：
 
 ```rust
-let text_gen = TextGeneration::with_default_config("qwen3.W3_72b").await?;
-let text_gen_full = TextGeneration::with_default_config("qwen3.W3_4b_full").await?;
+let text_gen = TextGeneration::with_default_config("qwen3.32b_q4").await?;
+let text_gen_full = TextGeneration::with_default_config("qwen3.32b_base").await?;
 ```
 
-添加新架构需要在 `ModelLoader` 中实现加载逻辑。
+### 添加新架构
+
+1. 在 `src/model/hub.rs` 中添加新的 `ModelArch` 枚举值
+2. 在 `src/model/config.rs` 的 `ModelLoader` 中添加加载逻辑
+3. 在 `src/model/mod.rs` 中为新模型实现 `ModelInference` trait
+4. 在 `models.toml` 中添加新架构的配置段
+
+## 📊 当前实现状态
+
+### ✅ 已实现
+
+- **Qwen3 系列完整支持**: 4B/8B/14B/32B 的 base 和 q4 变体
+- **智能配置管理**: tokenizer_repo 自动填充和格式识别
+- **流式聊天 API**: 基于 async-stream 的实时输出
+- **聊天上下文管理**: MiniJinja 模板支持
+- **推理参数配置**: 温度、采样长度、重复惩罚等
+- **网络代理支持**: ProxyGuard 和环境变量配置
+
+### 🚧 部分实现
+
+- **Llama 系列**: 配置已准备，代码中暂时注释
+
+### ❌ 待实现
+
+- **更多模型架构**: Llama、Mistral 等
+- **批量推理**: 同时处理多个请求
+- **模型量化工具**: 本地量化支持
 
 ## 📝 许可证
 
