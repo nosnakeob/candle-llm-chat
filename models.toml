@@ -1,46 +1,52 @@
-# 模型配置文件
+# 模型配置文件 - 基于约定的简化配置
+# 约定:
+# - GGUF 模型仓库名包含 "GGUF" 或 "-GGUF"
+# - Safetensors 模型默认文件为 "model.safetensors"
+# - 分片模型自动检测 "model.safetensors.index.json"
+# - tokenizer_repo 未配置时自动使用对应的非 GGUF 仓库
+# - 系列.大小_变体
+
+# === Qwen3 系列 ===
+[qwen3]
+
+[qwen3.4b_base]
+model_repo = "Qwen/Qwen3-4B-Instruct-2507"
+default = true
+
+[qwen3.4b_q4]
+model_repo = "Qwen/Qwen3-4B-GGUF"
+model_file = "Qwen3-4B-Q4_K_M.gguf"
+
+[qwen3.4b_abliterated]
+model_repo = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
+tokenizer_repo = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
+
+[qwen3.8b_base]
+model_repo = "Qwen/Qwen3-8B"
+
+[qwen3.8b_q4]
+model_repo = "Qwen/Qwen3-8B-GGUF"
+model_file = "Qwen3-8B-Q4_K_M.gguf"
+
+[qwen3.14b_base]
+model_repo = "Qwen/Qwen3-14B"
+
+[qwen3.14b_q4]
+model_repo = "Qwen/Qwen3-14B-GGUF"
+model_file = "Qwen3-14B-Q4_K_M.gguf"
+
+[qwen3.32b_base]
+model_repo = "Qwen/Qwen3-32B"
+
+[qwen3.32b_q4]
+model_repo = "Qwen/Qwen3-32B-GGUF"
+model_file = "Qwen3-32B-Q4_K_M.gguf"
+
+# === Llama 系列 ===
 [llama]
-[llama.DeepseekR1Llama8b]
+
+[llama.8b_deepseek_r1_q4]
 model_repo = "lmstudio-community/DeepSeek-R1-Distill-Llama-8B-GGUF"
-model_file = "DeepSeek-R1-Distill-Llama-8B-Q4_K_M"
+model_file = "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"
 tokenizer_repo = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 default = true
-
-[qwen2]
-[qwen2.W25_1_5b]
-model_repo = "Qwen/Qwen2-1.5B-Instruct-GGUF"
-model_file = "qwen2-1_5b-instruct-q4_0"
-tokenizer_repo = "Qwen/Qwen2-1.5B-Instruct"
-
-[qwen2.W25_7b]
-model_repo = "Qwen/Qwen2.5-7B-Instruct-GGUF"
-model_file = "qwen2.5-7b-instruct-q4_0"
-tokenizer_repo = "Qwen/Qwen2.5-7B-Instruct"
-default = true
-
-[qwen2.W25_14b]
-model_repo = "Qwen/Qwen2.5-14B-Instruct-GGUF"
-model_file = "qwen2.5-14b-instruct-q4_0"
-tokenizer_repo = "Qwen/Qwen2.5-14B-Instruct"
-
-[qwen3]
-[qwen3.W3_4b]
-model_repo = "Qwen/Qwen3-4B-GGUF"
-model_file = "Qwen3-4B-Q4_K_M"
-tokenizer_repo = "Qwen/Qwen3-4B"
-
-[qwen3.W3_8b]
-model_repo = "Qwen/Qwen3-8B-GGUF"
-model_file = "Qwen3-8B-Q4_K_M"
-tokenizer_repo = "Qwen/Qwen3-8B"
-default = true
-
-[qwen3.W3_14b]
-model_repo = "Qwen/Qwen3-14B-GGUF"
-model_file = "Qwen3-14B-Q4_K_M"
-tokenizer_repo = "Qwen/Qwen3-14B"
-
-[qwen3.W3_32b]
-model_repo = "Qwen/Qwen3-32B-GGUF"
-model_file = "Qwen3-32B-Q4_K_M"
-tokenizer_repo = "Qwen/Qwen3-32B"

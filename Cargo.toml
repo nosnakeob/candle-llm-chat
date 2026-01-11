@@ -8,21 +8,21 @@ unused = "allow"
 
 [dependencies]
 anyhow = "1.0"
-tokio = "1.48"
+tokio = "1.49"
 # intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"] }
 
-candle = { package = "candle-core", version = "0.9.2-alpha.1" }
-candle-nn = "0.9.2-alpha.1"
+candle = { package = "candle-core", version = "0.9.2-alpha.2" }
+candle-nn = "0.9.2-alpha.2"
 # feat mkl STATUS_DLL_NOT_FOUND
-candle-transformers = { version = "0.9.2-alpha.1", features = [
+candle-transformers = { version = "0.9.2-alpha.2", features = [
     "cuda",
     "cudnn",
     # "flash-attn",
 ] }
-candle-examples = "0.9.2-alpha.1"
+candle-examples = "0.9.2-alpha.2"
 
 hf-hub = { version = "0.4", features = ["tokio"] }
-tokenizers = "0.21"
+tokenizers = { version = "*", features = ["http"] }
 
 async-stream = "0.3"
 futures-core = "0.3"
@@ -31,12 +31,14 @@ futures-util = "0.3"
 tracing = "0.1"
 
 config = "0.15"
+toml = "0.9"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+serde_default_utils = { version = "0.3", features = ["inline"] }
 derive-new = "0.7"
 strum = { version = "0.27", features = ["derive"] }
-minijinja = { version = "2.12", features = ["loader"] }
-minijinja-contrib = { version = "2.12", features = ["pycompat"] }
+minijinja = { version = "2.14", features = ["loader"] }
+minijinja-contrib = { version = "2.14", features = ["pycompat"] }
 regex = "1.12"
 
 [dev-dependencies]
