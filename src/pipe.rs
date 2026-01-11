@@ -1,6 +1,6 @@
-use crate::model::Forward;
+use crate::model::ModelInference;
 use crate::model::config::{InferenceConfig, ModelLoader};
-use crate::model::hub::ModelInfo;
+use crate::model::registry::ModelRegistry;
 use crate::utils::chat::ChatContext;
 use anyhow::{Error, Result};
 use async_stream::try_stream;
@@ -9,25 +9,41 @@ use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::utils::apply_repeat_penalty;
 use futures_core::stream::Stream;
+use hf_hub::api::tokio::ApiBuilder;
+use serde_json::Value;
+use std::fs;
 use tracing::info;
 
 pub struct TextGeneration {
-    model: Box<dyn Forward>,
+    model: Box<dyn ModelInference>,
     tos: TokenOutputStream,
     logits_processor: LogitsProcessor,
     ctx: ChatContext,
     infer_conf: InferenceConfig,
-    model_info: ModelInfo,
+    eos_token_id: u32,
 }
 
 impl TextGeneration {
     pub async fn new(model_id: &str, config: InferenceConfig) -> Result<Self> {
-        let (model, tokenizer, model_info) = ModelLoader::load(model_id, &config.device).await?;
+        let registry = ModelRegistry::new()?;
+        let hub_info = registry.get(model_id)?;
+        let (model, tokenizer) = ModelLoader::load(hub_info, &config.device).await?;
 
         let logits_processor =
             LogitsProcessor::new(config.seed, Some(config.temperature), config.top_p);
 
-        let ctx = ChatContext::from_template(&model_info.chat_template)?;
+        let ctx = ChatContext::from_repo(&hub_info.tokenizer_repo).await?;
+
+        let pth = ApiBuilder::from_env()
+            .build()?
+            .model(hub_info.tokenizer_repo.clone())
+            .get("config.json")
+            .await?;
+        let v: Value = serde_json::from_str(&fs::read_to_string(pth)?)?;
+        let eos_token_id = v
+            .get("eos_token_id")
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| anyhow!("eos_token_id not found"))? as u32;
 
         Ok(Self {
             model,
@@ -35,7 +51,7 @@ impl TextGeneration {
             logits_processor,
             ctx,
             infer_conf: config,
-            model_info,
+            eos_token_id,
         })
     }
 
@@ -52,6 +68,8 @@ impl TextGeneration {
     pub fn chat<'a>(&'a mut self, prompt: &'a str) -> impl Stream<Item = Result<String>> + 'a {
         let mut answer = String::with_capacity(1024);
         self.ctx.push_msg(prompt);
+        // 开始新的推理时清空 KV 缓存
+        self.model.clr_kv_cache();
 
         try_stream!({
             let prompt = self.ctx.render()?;
@@ -78,7 +96,7 @@ impl TextGeneration {
                     yield t;
                 }
 
-                if next_token == self.model_info.eos_token_id {
+                if next_token == self.eos_token_id {
                     break;
                 }
             }
@@ -124,7 +142,11 @@ impl TextGeneration {
         let input = Tensor::new(input_arr, &self.infer_conf.device)?.unsqueeze(0)?;
 
         // 获取模型输出并压缩维度
-        let mut logits = self.model.forward(&input, idx_pos)?.squeeze(0)?;
+        let mut logits = self
+            .model
+            .forward(&input, idx_pos)?
+            .squeeze(0)?
+            .squeeze(0)?;
 
         // 非首个字符应用惩罚
         if let Some(ans_start_idx) = ans_start_idx {
@@ -149,7 +171,7 @@ impl TextGeneration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Forward;
+    use crate::model::ModelInference;
     use crate::pipe::TextGeneration;
     use crate::utils::chat::ChatContext;
     use crate::utils::{get_user_prompt, proxy::ProxyGuard};
@@ -172,7 +194,7 @@ mod tests {
     fn gen_next_token(
         ctx_tokens: &[u32],
         idx_pos: usize,
-        model: &mut Box<dyn Forward>,
+        model: &mut Box<dyn ModelInference>,
         logits_processor: &mut LogitsProcessor,
         config: &InferenceConfig,
         ans_start_idx: Option<usize>,
@@ -183,7 +205,7 @@ mod tests {
         }
         .unsqueeze(0)?;
 
-        let mut logits = model.forward(&input, idx_pos)?.squeeze(0)?;
+        let mut logits = model.forward(&input, idx_pos)?.squeeze(0)?.squeeze(0)?;
 
         if let Some(ans_start_idx) = ans_start_idx {
             if config.repeat_penalty != 1. {
@@ -200,17 +222,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_prompt() -> Result<()> {
-        let _proxy = ProxyGuard::new(7890);
+        // let _proxy = ProxyGuard::new(7890);
 
-        let (mut model, tokenizer, model_info) =
-            ModelLoader::load("qwen3", &candle::Device::cuda_if_available(0)?).await?;
+        let registry = ModelRegistry::new()?;
+        let hub_info = registry.get("qwen3.4b_base")?;
+
+        let (mut model, tokenizer) =
+            ModelLoader::load(hub_info, &candle::Device::cuda_if_available(0)?).await?;
         let config = InferenceConfig::default();
 
         // 初始化模型、分词器和logits处理器
         let mut tos = TokenOutputStream::new(tokenizer);
         let mut logits_processor =
             LogitsProcessor::new(config.seed, Some(config.temperature), config.top_p);
-        let mut ctx = ChatContext::from_template(&model_info.chat_template)?;
+        let mut ctx = ChatContext::from_repo(&hub_info.tokenizer_repo).await?;
+
+        let pth = ApiBuilder::from_env()
+            .build()?
+            .model(hub_info.tokenizer_repo.clone())
+            .get("config.json")
+            .await?;
+        let v: Value = serde_json::from_str(&fs::read_to_string(pth)?)?;
+        let eos_token_id = v
+            .get("eos_token_id")
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| anyhow!("eos_token_id not found"))? as u32;
 
         // 初始化上下文token列表
         let mut ctx_tokens = vec![];
@@ -226,7 +262,7 @@ mod tests {
         for prompt_str in prompts {
             ctx.push_msg(prompt_str);
             let prompt = ctx.render()?;
-            // println!("prompt: {}", prompt);
+            model.clr_kv_cache();
             ctx_tokens = str2tokens(&prompt, tos.tokenizer())?;
 
             let start = std::time::Instant::now();
@@ -259,7 +295,7 @@ mod tests {
                     io::stdout().flush()?;
                 }
 
-                if next_token == model_info.eos_token_id {
+                if next_token == eos_token_id {
                     break;
                 }
             }
@@ -289,7 +325,7 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline() -> Result<()> {
         tracing_subscriber::fmt::init();
-        let _proxy = ProxyGuard::new(7890);
+        // let _proxy = ProxyGuard::new(7890);
 
         let mut text_gen = TextGeneration::default().await?;
 
@@ -301,8 +337,8 @@ mod tests {
             let stream = text_gen.chat(&prompt_str);
             pin_mut!(stream); // 固定 stream
 
-            while let Some(Ok(t)) = stream.next().await {
-                print!("{t}");
+            while let Some(r) = stream.next().await {
+                print!("{}", r?);
                 io::stdout().flush()?;
             }
         }

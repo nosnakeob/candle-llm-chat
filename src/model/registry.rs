@@ -145,7 +145,7 @@ mod tests {
 
         // 测试获取量化模型
         let model = registry.get("qwen3.4b_q4")?;
-        assert_eq!(model.model_repo, "Qwen/Qwen3-4B-GGUF");
+        assert_eq!(model.model_repo, "byteshape/Qwen3-4B-Instruct-2507-GGUF");
         dbg!(model);
 
         // 测试获取基础模型（Safetensors）
@@ -154,7 +154,7 @@ mod tests {
 
         // 测试获取默认模型 - 仅使用架构名
         let default_qwen3 = registry.get("qwen3")?;
-        assert_eq!(default_qwen3.model_repo, "Qwen/Qwen3-8B");
+        assert_eq!(default_qwen3.model_repo, "Qwen/Qwen3-4B-Instruct-2507");
         assert!(default_qwen3.default);
 
         // 测试不存在的架构

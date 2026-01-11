@@ -1,4 +1,4 @@
-use crate::model::Forward;
+use crate::model::ModelInference;
 use crate::model::hub::{HubInfo, ModelArch, ModelType};
 use crate::model::registry::ModelRegistry;
 use crate::utils::load::ApiRepoExt;
@@ -63,7 +63,7 @@ impl ModelLoader {
     pub async fn load(
         hub_info: &HubInfo,
         device: &Device,
-    ) -> Result<(Box<dyn Forward>, Tokenizer)> {
+    ) -> Result<(Box<dyn ModelInference>, Tokenizer)> {
         if hub_info.model_repo.to_lowercase().contains("gguf") {
             Self::load_gguf(hub_info, device).await
         } else {
@@ -75,7 +75,7 @@ impl ModelLoader {
     async fn load_gguf(
         hub_info: &HubInfo,
         device: &Device,
-    ) -> Result<(Box<dyn Forward>, Tokenizer)> {
+    ) -> Result<(Box<dyn ModelInference>, Tokenizer)> {
         let model_pth = download_gguf(&hub_info.model_repo, &hub_info.model_file).await?;
 
         let mut file = File::open(model_pth)?;
@@ -84,10 +84,11 @@ impl ModelLoader {
         let repo = hub_info.model_repo.to_lowercase();
         let model = if repo.contains("qwen3") {
             let model = quantized_qwen3::ModelWeights::from_gguf(ct, &mut file, device)?;
-            Box::new(model) as Box<dyn Forward>
+            Box::new(model) as Box<dyn ModelInference>
         } else if repo.contains("llama") {
-            let model = quantized_llama::ModelWeights::from_gguf(ct, &mut file, device)?;
-            Box::new(model) as Box<dyn Forward>
+            // let model = quantized_llama::ModelWeights::from_gguf(ct, &mut file, device)?;
+            // Box::new(model) as Box<dyn ModelInference>
+            bail!("Llama gguf support not yet implemented");
         } else {
             bail!("Unsupported model type");
         };
@@ -101,7 +102,7 @@ impl ModelLoader {
     async fn load_safetensors(
         hub_info: &HubInfo,
         device: &Device,
-    ) -> Result<(Box<dyn Forward>, Tokenizer)> {
+    ) -> Result<(Box<dyn ModelInference>, Tokenizer)> {
         let api = ApiBuilder::from_env().build()?;
         let repo = api.model(hub_info.model_repo.clone());
 
@@ -122,7 +123,7 @@ impl ModelLoader {
         let config_path = repo.get("config.json").await?;
         let config_content = std::fs::read(&config_path)?;
 
-        let model: Box<dyn Forward> = match arch {
+        let model: Box<dyn ModelInference> = match arch {
             ModelArch::Qwen3 => {
                 let config: Qwen3Config = serde_json::from_slice(&config_content)?;
                 let model = Qwen3Model::new(&config, vb)?;
