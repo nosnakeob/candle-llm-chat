@@ -14,8 +14,8 @@ model_repo = "Qwen/Qwen3-4B-Instruct-2507"
 default = true
 
 [qwen3.4b_q4]
-model_repo = "Qwen/Qwen3-4B-GGUF"
-model_file = "Qwen3-4B-Q4_K_M.gguf"
+model_repo = "byteshape/Qwen3-4B-Instruct-2507-GGUF"
+model_file = "Qwen3-4B-Instruct-2507-Q4_K_S-3.66bpw.gguf"
 
 [qwen3.4b_abliterated]
 model_repo = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
@@ -43,10 +43,10 @@ model_repo = "Qwen/Qwen3-32B-GGUF"
 model_file = "Qwen3-32B-Q4_K_M.gguf"
 
 # === Llama 系列 ===
-[llama]
+# [llama]
 
-[llama.8b_deepseek_r1_q4]
-model_repo = "lmstudio-community/DeepSeek-R1-Distill-Llama-8B-GGUF"
-model_file = "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"
-tokenizer_repo = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-default = true
+# [llama.8b_deepseek_r1_q4]
+# model_repo = "lmstudio-community/DeepSeek-R1-Distill-Llama-8B-GGUF"
+# model_file = "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"
+# tokenizer_repo = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+# default = true
