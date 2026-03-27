@@ -120,12 +120,11 @@ impl ApiRepoExt for hf_hub::api::tokio::ApiRepo {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::registry::ModelRegistry;
     use crate::utils::{log_tensor_size, proxy::ProxyGuard};
-    use candle_transformers::models::flux::model;
-    use candle_transformers::models::hiera;
     use serde_json::Value;
     use std::io::BufReader;
 

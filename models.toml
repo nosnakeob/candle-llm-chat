@@ -18,8 +18,8 @@ model_repo = "byteshape/Qwen3-4B-Instruct-2507-GGUF"
 model_file = "Qwen3-4B-Instruct-2507-Q4_K_S-3.66bpw.gguf"
 
 [qwen3.4b_abliterated]
-model_repo = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
-tokenizer_repo = "huihui-ai/Huihui-Qwen3-4B-abliterated-v2"
+model_repo = "Goekdeniz-Guelmez/Josiefied-Qwen3-4B-abliterated-v2"
+tokenizer_repo = "Goekdeniz-Guelmez/Josiefied-Qwen3-4B-abliterated-v2"
 
 [qwen3.8b_base]
 model_repo = "Qwen/Qwen3-8B"

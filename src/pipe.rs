@@ -327,7 +327,7 @@ mod tests {
         tracing_subscriber::fmt::init();
         // let _proxy = ProxyGuard::new(7890);
 
-        let mut text_gen = TextGeneration::default().await?;
+        let mut text_gen = TextGeneration::with_default_config("qwen3.4b_abliterated").await?;
 
         for _ in 0..3 {
             // 获取用户输入

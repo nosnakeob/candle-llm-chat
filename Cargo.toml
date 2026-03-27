@@ -11,17 +11,17 @@ anyhow = "1.0"
 tokio = "1.49"
 # intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"] }
 
-candle = { package = "candle-core", version = "0.9.2-alpha.2" }
-candle-nn = "0.9.2-alpha.2"
+candle = { package = "candle-core", version = "0.9.2" }
+candle-nn = "0.9.2"
 # feat mkl STATUS_DLL_NOT_FOUND
-candle-transformers = { version = "0.9.2-alpha.2", features = [
+candle-transformers = { version = "0.9.2", features = [
     "cuda",
     "cudnn",
     # "flash-attn",
 ] }
-candle-examples = "0.9.2-alpha.2"
+candle-examples = "0.9.2"
 
-hf-hub = { version = "0.4", features = ["tokio"] }
+hf-hub = { version = "0.5", features = ["tokio"] }
 tokenizers = { version = "*", features = ["http"] }
 
 async-stream = "0.3"
@@ -36,9 +36,9 @@ serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_default_utils = { version = "0.3", features = ["inline"] }
 derive-new = "0.7"
-strum = { version = "0.27", features = ["derive"] }
-minijinja = { version = "2.14", features = ["loader"] }
-minijinja-contrib = { version = "2.14", features = ["pycompat"] }
+strum = { version = "0.28", features = ["derive"] }
+minijinja = { version = "2.18", features = ["loader"] }
+minijinja-contrib = { version = "2.18", features = ["pycompat"] }
 regex = "1.12"
 
 [dev-dependencies]
