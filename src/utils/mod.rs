@@ -1,6 +1,6 @@
 pub mod chat;
+pub mod env_guard;
 pub mod load;
-pub mod proxy;
 
 use candle::quantized::gguf_file::Content;
 use std::io::BufRead;
