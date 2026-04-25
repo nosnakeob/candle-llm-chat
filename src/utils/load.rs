@@ -124,7 +124,7 @@ impl ApiRepoExt for hf_hub::api::tokio::ApiRepo {
 mod tests {
     use super::*;
     use crate::model::registry::ModelRegistry;
-    use crate::utils::{log_tensor_size, proxy::ProxyGuard};
+    use crate::utils::{log_tensor_size, env_guard::ProxyGuard};
     use serde_json::Value;
     use std::io::BufReader;
 

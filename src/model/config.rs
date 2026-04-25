@@ -5,6 +5,7 @@ use crate::utils::load::ApiRepoExt;
 use crate::utils::load::{download_gguf, load_tokenizer};
 use anyhow::{Result, anyhow};
 use candle::quantized::gguf_file::Content;
+use candle::quantized::tokenizer::TokenizerFromGguf;
 use candle::{DType, Device};
 use candle_nn::VarBuilder;
 use candle_transformers::models::{
@@ -81,6 +82,8 @@ impl ModelLoader {
         let mut file = File::open(model_pth)?;
         let ct = Content::read(&mut file)?;
 
+        let tokenizer = Tokenizer::from_gguf(&ct)?;
+
         let repo = hub_info.model_repo.to_lowercase();
         let model = if repo.contains("qwen3") {
             let model = quantized_qwen3::ModelWeights::from_gguf(ct, &mut file, device)?;
@@ -92,8 +95,6 @@ impl ModelLoader {
         } else {
             bail!("Unsupported model type");
         };
-
-        let tokenizer = load_tokenizer(&hub_info.tokenizer_repo)?;
 
         Ok((model, tokenizer))
     }
