@@ -174,7 +174,7 @@ mod tests {
     use crate::model::ModelInference;
     use crate::pipe::TextGeneration;
     use crate::utils::chat::ChatContext;
-    use crate::utils::{get_user_prompt, proxy::ProxyGuard};
+    use crate::utils::{get_user_prompt, env_guard::ProxyGuard};
     use anyhow::{Error, Result};
     use candle::Tensor;
     use candle_transformers::generation::LogitsProcessor;
