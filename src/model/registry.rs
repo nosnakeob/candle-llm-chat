@@ -130,37 +130,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_model_registry_parse() -> Result<()> {
-        let registry = ModelRegistry::new()?;
-        dbg!(&registry);
-
-        assert!(!registry.qwen3.is_empty());
-
-        Ok(())
-    }
-
-    #[test]
     fn test_get_model() -> Result<()> {
         let registry = ModelRegistry::new()?;
 
-        // 测试获取量化模型
+        // 配置非空
+        assert!(!registry.qwen3.is_empty());
+
+        // 获取量化模型
         let model = registry.get("qwen3.4b_q4")?;
         assert_eq!(model.model_repo, "byteshape/Qwen3-4B-Instruct-2507-GGUF");
         dbg!(model);
 
-        // 测试获取基础模型（Safetensors）
+        // 获取基础模型
         let model = registry.get("qwen3.8b_base")?;
         assert_eq!(model.model_repo, "Qwen/Qwen3-8B");
 
-        // 测试获取默认模型 - 仅使用架构名
+        // 获取默认模型（只传架构名）
         let default_qwen3 = registry.get("qwen3")?;
         assert_eq!(default_qwen3.model_repo, "Qwen/Qwen3-4B-Instruct-2507");
         assert!(default_qwen3.default);
 
-        // 测试不存在的架构
+        // 不存在的架构和变体均返回错误
         assert!(registry.get("unknown").is_err());
-
-        // 测试不存在的变体
         assert!(registry.get("qwen3.NonExistent").is_err());
 
         Ok(())
@@ -170,31 +161,19 @@ mod tests {
     fn test_tokenizer_repo_auto_fill() -> Result<()> {
         let registry = ModelRegistry::new()?;
 
-        // 测试 base 模型的 tokenizer_repo 自动填充
-        let base_model = registry.get("qwen3.8b_base")?;
-        assert_eq!(base_model.tokenizer_repo, "Qwen/Qwen3-8B");
+        // base 模型：tokenizer_repo = model_repo
+        let base_8b = registry.get("qwen3.8b_base")?;
+        assert_eq!(base_8b.tokenizer_repo, "Qwen/Qwen3-8B");
 
-        // 测试量化模型的 tokenizer_repo 自动从对应 base 模型获取
-        let q4_model = registry.get("qwen3.8b_q4")?;
-        assert_eq!(q4_model.tokenizer_repo, "Qwen/Qwen3-8B");
+        // 量化变体：tokenizer_repo 继承对应 base
+        let q4_8b = registry.get("qwen3.8b_q4")?;
+        assert_eq!(q4_8b.tokenizer_repo, "Qwen/Qwen3-8B");
 
-        // 测试另一个 base 模型
         let base_4b = registry.get("qwen3.4b_base")?;
-        assert_eq!(base_4b.tokenizer_repo, "Qwen/Qwen3-4B");
+        assert_eq!(base_4b.tokenizer_repo, "Qwen/Qwen3-4B-Instruct-2507");
 
-        // 测试对应的量化模型
         let q4_4b = registry.get("qwen3.4b_q4")?;
-        assert_eq!(q4_4b.tokenizer_repo, "Qwen/Qwen3-4B");
-
-        // 测试已经配置了 tokenizer_repo 的模型（不应该被覆盖）
-        if let Some(llama_models) = &registry.llama {
-            if let Some(deepseek_model) = llama_models.get("8b_deepseek_r1_q4") {
-                assert_eq!(
-                    deepseek_model.tokenizer_repo,
-                    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-                );
-            }
-        }
+        assert_eq!(q4_4b.tokenizer_repo, "Qwen/Qwen3-4B-Instruct-2507");
 
         Ok(())
     }

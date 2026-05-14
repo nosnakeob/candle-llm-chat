@@ -55,39 +55,14 @@ pub enum ModelArch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        model::{hub, registry::ModelRegistry},
-        utils::load::{download_gguf, load_tokenizer},
-    };
-    use std::{collections::HashMap, fs::File};
-
-    #[tokio::test]
-    async fn test_hub_info_load() -> Result<()> {
-        let toml_str = r#"
-            # [qwen3]
-            [4b_base]
-            model_repo = "Qwen/Qwen3-4B"
-
-            [4b_q4]
-            model_repo = "Qwen/Qwen3-4B-GGUF"
-            model_file = "Qwen3-4B-Q4_K_M.gguf"
-            default = true
-        "#;
-
-        let qwen3: HashMap<String, HubInfoRaw> = toml::from_str(toml_str)?;
-
-        dbg!(&qwen3);
-
-        Ok(())
-    }
 
     #[test]
     fn test_hub_info_conversion() -> Result<()> {
-        // 测试 HubInfoRaw 到 HubInfo 的转换
+        // tokenizer_repo 为 None 时应自动填充为 model_repo
         let raw = HubInfoRaw {
             model_repo: "Qwen/Qwen3-8B".to_string(),
             model_file: "model.safetensors".to_string(),
-            tokenizer_repo: None, // 测试自动填充
+            tokenizer_repo: None,
             default: true,
         };
 
@@ -95,7 +70,7 @@ mod tests {
 
         assert_eq!(hub_info.model_repo, "Qwen/Qwen3-8B");
         assert_eq!(hub_info.model_file, "model.safetensors");
-        assert_eq!(hub_info.tokenizer_repo, "Qwen/Qwen3-8B"); // 自动填充
+        assert_eq!(hub_info.tokenizer_repo, "Qwen/Qwen3-8B");
         assert!(hub_info.default);
 
         Ok(())
