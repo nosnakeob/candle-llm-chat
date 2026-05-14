@@ -40,6 +40,9 @@ strum = { version = "0.28", features = ["derive"] }
 minijinja = { version = "2.19", features = ["loader"] }
 minijinja-contrib = { version = "2.19", features = ["pycompat"] }
 regex = "1.12"
+reqwest = { version = "0.13", features = ["blocking"] }
+image = "0.24"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
+futures-util = "0.3"
