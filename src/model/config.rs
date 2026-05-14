@@ -146,6 +146,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore] // 需要下载模型文件
     async fn test_model_loader_load() -> Result<()> {
         let device = Device::cuda_if_available(0)?;
         let registry = ModelRegistry::new()?;
