@@ -65,6 +65,9 @@ impl TextGeneration {
         Self::with_default_config("qwen3").await
     }
 
+    /// 流式对话（用于直接展示给用户）
+    ///
+    /// 适用于普通对话，不需要检测工具调用。
     pub fn chat<'a>(&'a mut self, prompt: &'a str) -> impl Stream<Item = Result<String>> + 'a {
         let mut answer = String::with_capacity(1024);
         self.ctx.push_msg(prompt);
@@ -115,6 +118,93 @@ impl TextGeneration {
                 ctx_tokens.len()
             );
         })
+    }
+
+    /// 完整响应对话（用于 Agent tool calling 循环）
+    ///
+    /// 与 `chat()` 不同，此方法返回完整的响应字符串，而不是流式。
+    /// 调用方负责将 user message 推入 context。
+    ///
+    /// 典型使用方式：
+    /// ```ignore
+    /// ctx.push_msg(user_message);
+    /// model.clr_kv_cache();
+    /// let response = pipe.chat_full()?;
+    /// ctx.push_msg(&response);  // 助手回复入上下文
+    /// ```
+    pub fn chat_full(&mut self) -> Result<String> {
+        let mut answer = String::with_capacity(1024);
+        self.model.clr_kv_cache();
+
+        let prompt = self.ctx.render()?;
+        let mut ctx_tokens = self.str2tokens(&prompt)?;
+
+        let start = std::time::Instant::now();
+        let ans_start_idx = ctx_tokens.len();
+
+        for index in 0..self.infer_conf.sample_len {
+            let next_token = if index == 0 {
+                self.gen_next_token(&ctx_tokens, 0, None)?
+            } else {
+                self.gen_next_token(
+                    &ctx_tokens,
+                    ans_start_idx + index - 1,
+                    Some(ans_start_idx),
+                )?
+            };
+            ctx_tokens.push(next_token);
+
+            if let Some(t) = self.tos.next_token(next_token)? {
+                answer.push_str(&t);
+            }
+
+            if next_token == self.eos_token_id {
+                break;
+            }
+        }
+
+        if let Some(t) = self.tos.decode_rest()? {
+            answer.push_str(&t);
+        }
+
+        self.ctx.push_msg(&answer);
+        self.tos.clear();
+
+        info!(
+            "speed: {:.2} token/s, total tokens: {}",
+            (ctx_tokens.len() - ans_start_idx) as f64 / start.elapsed().as_secs_f64(),
+            ctx_tokens.len()
+        );
+
+        Ok(answer)
+    }
+
+    /// 向对话上下文注入 system prompt（工具调用时使用）
+    ///
+    /// 将 system 消息加入 ChatContext，工具描述会通过 chat_template 渲染。
+    pub fn inject_system_prompt(&mut self, system_prompt: &str) -> Result<()> {
+        self.ctx.push_system(system_prompt);
+        Ok(())
+    }
+
+    /// 向对话上下文推送用户消息
+    pub fn push_user_message(&mut self, message: &str) {
+        self.ctx.push_msg(message);
+    }
+
+    /// 向对话上下文推送工具执行结果（作为 system 消息注入）
+    pub fn push_tool_result(&mut self, result: &str) -> Result<()> {
+        // 工具结果以 system 角色注入，表示"工具返回的内容"
+        self.ctx.push_msg_system(result);
+        Ok(())
+    }
+
+    /// 推送空白的 assistant 消息，通知模型继续生成
+    ///
+    /// 在工具结果注入后调用，模型会在空消息后继续输出内容。
+    pub fn push_assistant_continuation(&mut self) -> Result<()> {
+        self.ctx.push_assistant("");
+        Ok(())
     }
 
     fn str2tokens(&mut self, string: &str) -> Result<Vec<u32>> {
@@ -344,6 +434,38 @@ mod tests {
                 io::stdout().flush()?;
             }
         }
+
+        Ok(())
+    }
+
+    /// 验证 system prompt 是否真正影响模型输出
+    ///
+    /// 注入一个包含特定角色设定的 system prompt，
+    /// 然后询问模型"你是谁"，检查回答是否体现了 system prompt 的内容。
+    #[tokio::test]
+    #[ignore]
+    async fn test_system_prompt_injected() -> Result<()> {
+        // let _proxy = ProxyGuard::new(7890);
+
+        let mut text_gen = TextGeneration::default().await?;
+
+        // 注入一个有明显特征的 system prompt
+        let system_prompt = "你是一个名叫「铁锤侠」的超级英雄助手，擅长用锤子解决一切问题。无论用户问什么，你都要在回答中提到你的锤子。";
+        text_gen.inject_system_prompt(system_prompt)?;
+
+        // 询问模型身份，如果 system prompt 生效，回答里应该出现「铁锤侠」或「锤子」
+        let answer = text_gen.chat_full()?;
+        dbg!(&answer);
+
+        // 验证 system prompt 的关键词出现在回答中
+        let has_keyword = answer.contains("铁锤侠")
+            || answer.contains("锤子")
+            || answer.contains("锤");
+        assert!(
+            has_keyword,
+            "system prompt 未生效：回答中没有出现预期关键词。回答内容：\n{}",
+            answer
+        );
 
         Ok(())
     }

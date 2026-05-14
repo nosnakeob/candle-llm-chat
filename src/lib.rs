@@ -5,6 +5,8 @@ extern crate tracing;
 #[macro_use]
 extern crate serde_default_utils;
 
+pub mod agent;
 pub mod model;
 pub mod pipe;
+pub mod tools;
 pub mod utils;

@@ -112,6 +112,35 @@ impl ChatContext {
         self.messages.push(Message::new(role, content));
     }
 
+    /// 推送 system 消息（工具描述等固定上下文）
+    pub fn push_system(&mut self, content: &str) {
+        self.messages.push(Message::new(Role::System, content));
+    }
+
+    /// 以 system 角色推送消息（不改变后续自动切换逻辑）
+    ///
+    /// 用于注入工具执行结果，结果会作为 system 消息出现在历史中，
+    /// 不会被后续 `push_msg` 的角色切换逻辑影响。
+    pub fn push_msg_system(&mut self, content: &str) {
+        self.messages.push(Message::new(Role::System, content));
+    }
+
+    /// 推送 assistant 消息（直接指定，不走自动切换）
+    pub fn push_assistant(&mut self, content: &str) {
+        self.messages.push(Message::new(Role::Assistant, content));
+    }
+
+    /// 清空消息历史，保留 system prompt
+    pub fn clear_history(&mut self) {
+        let system_messages: Vec<_> = self
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .cloned()
+            .collect();
+        self.messages = system_messages;
+    }
+
     /// 渲染为模板字符串
     pub fn render(&self) -> Result<String> {
         if self.messages.is_empty() {
