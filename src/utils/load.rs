@@ -123,83 +123,10 @@ impl ApiRepoExt for hf_hub::api::tokio::ApiRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::registry::ModelRegistry;
-    use crate::utils::{log_tensor_size, env_guard::ProxyGuard};
-    use serde_json::Value;
-    use std::io::BufReader;
 
-    #[tokio::test]
-    async fn test_load_gguf() -> Result<()> {
-        tracing_subscriber::fmt::init();
-
-        let registry = ModelRegistry::new()?;
-
-        let model_id = "qwen3.4b_q4";
-
-        let hub_info = registry.get(model_id).unwrap();
-
-        let model_path = download_gguf(&hub_info.model_repo, &hub_info.model_file).await?;
-
-        let mut file = File::open(&model_path)?;
-
-        let api = ApiBuilder::from_env().build()?;
-
-        // 构建模型
-        let ct = Content::read(&mut file)?;
-
-        let pth = api
-            .model(hub_info.tokenizer_repo.clone())
-            .get("tokenizer_config.json")
-            .await?;
-
-        let file = File::open(pth)?;
-        let mut json: Value = serde_json::from_reader(BufReader::new(file))?;
-        dbg!(&ct.metadata.keys());
-
-        log_tensor_size(&ct);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_hub_load_safetensors() -> Result<()> {
-        // 测试加载分片的 safetensors 模型
-        let api = ApiBuilder::from_env().build()?;
-        let repo = api.model("Qwen/Qwen3-8B".to_string());
-
-        let paths = repo.get_safetensors().await?;
-
-        println!("加载了 {} 个 safetensors 文件:", paths.len());
-        for path in &paths {
-            println!("  - {:?}", path.file_name());
-        }
-
-        assert!(!paths.is_empty());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_get_chat_template() -> Result<()> {
-        let api = ApiBuilder::from_env().build()?;
-        let repo = api.model("Qwen/Qwen3-4B-Instruct-2507".to_string());
-
-        let info: Value = repo
-            .info_request()
-            .query(&[("chat_template", "default")])
-            .send()
-            .await?
-            .json()
-            .await?;
-        dbg!(info);
-
-        Ok(())
-    }
-
+    /// 验证 chat template JSON 解析逻辑（不需要网络）
     #[test]
     fn test_chat_template_parsing() -> Result<()> {
-        // 测试 chat template 解析逻辑，不需要网络请求
-        use serde_json::Value;
-
         let mock_config = r#"
         {
             "chat_template": "{{ bos_token }}{% for message in messages %}{% if message['role'] == 'user' %}{{ '<|im_start|>user\\n' + message['content'] + '<|im_end|>\\n<|im_start|>assistant\\n' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + '<|im_end|>\\n' }}{% endif %}{% endfor %}",
@@ -207,16 +134,35 @@ mod tests {
         }
         "#;
 
-        let json: Value = serde_json::from_str(mock_config)?;
+        let json: serde_json::Value = serde_json::from_str(mock_config)?;
         let chat_template = json["chat_template"].as_str().unwrap();
 
         assert!(chat_template.contains("im_start"));
         assert!(chat_template.contains("user"));
         assert!(chat_template.contains("assistant"));
 
-        println!("✅ Chat template 解析测试通过");
-        println!("Template: {}", &chat_template[..50]); // 显示前50个字符
+        Ok(())
+    }
 
+    /// 验证 GGUF 模型下载（需要网络和磁盘空间）
+    #[tokio::test]
+    #[ignore]
+    async fn test_load_gguf() -> Result<()> {
+        let registry = crate::model::registry::ModelRegistry::new()?;
+        let hub_info = registry.get("qwen3.4b_q4")?;
+        let model_path = download_gguf(&hub_info.model_repo, &hub_info.model_file).await?;
+        assert!(model_path.exists());
+        Ok(())
+    }
+
+    /// 验证 safetensors 分片文件加载（需要网络和磁盘空间）
+    #[tokio::test]
+    #[ignore]
+    async fn test_hub_load_safetensors() -> Result<()> {
+        let api = ApiBuilder::from_env().build()?;
+        let repo = api.model("Qwen/Qwen3-8B".to_string());
+        let paths = repo.get_safetensors().await?;
+        assert!(!paths.is_empty());
         Ok(())
     }
 }
