@@ -11,7 +11,6 @@
 
 [qwen3.4b_base]
 model_repo = "Qwen/Qwen3-4B-Instruct-2507"
-default = true
 
 [qwen3.4b_q4]
 model_repo = "byteshape/Qwen3-4B-Instruct-2507-GGUF"
@@ -27,6 +26,7 @@ model_repo = "Qwen/Qwen3-8B"
 [qwen3.8b_q4]
 model_repo = "Qwen/Qwen3-8B-GGUF"
 model_file = "Qwen3-8B-Q4_K_M.gguf"
+default = true
 
 [qwen3.14b_base]
 model_repo = "Qwen/Qwen3-14B"

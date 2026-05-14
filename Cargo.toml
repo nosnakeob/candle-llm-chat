@@ -3,8 +3,11 @@ name = "candle-llm-chat"
 version = "0.5.1"
 edition = "2024"
 
+[features]
+ffmpeg = []
+
 [lints.rust]
-unused = { level = "allow", priority = 0 }
+unused = "allow"
 
 [dependencies]
 anyhow = "1.0"
