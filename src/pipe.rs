@@ -221,11 +221,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // 需要下载模型文件
     async fn test_prompt() -> Result<()> {
         // let _proxy = ProxyGuard::new(7890);
 
         let registry = ModelRegistry::new()?;
-        let hub_info = registry.get("qwen3.4b_base")?;
+        let hub_info = registry.get("qwen3.4b_q4")?;
 
         let (mut model, tokenizer) =
             ModelLoader::load(hub_info, &candle::Device::cuda_if_available(0)?).await?;
@@ -323,6 +324,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // 交互式测试，需要手动输入
     async fn test_pipeline() -> Result<()> {
         tracing_subscriber::fmt::init();
         // let _proxy = ProxyGuard::new(7890);

@@ -77,7 +77,7 @@ impl Drop for HfEndpointGuard {
 mod tests {
     use super::*;
 
-    /// Guard Drop 后应恢复原来的值（原本已存在的情况）
+    /// 验证 HfEndpointGuard Drop 后恢复原始值
     #[test]
     fn test_hf_endpoint_guard_restore_prev() {
         let original = "https://original-endpoint.example.com";
@@ -88,21 +88,16 @@ mod tests {
             assert_eq!(env::var("HF_ENDPOINT").unwrap(), "https://hf-mirror.com");
         }
 
-        assert_eq!(
-            env::var("HF_ENDPOINT").unwrap(),
-            original,
-            "Drop 后应恢复原始值"
-        );
+        assert_eq!(env::var("HF_ENDPOINT").unwrap(), original, "Drop 后应恢复原始值");
 
-        // 清理
         unsafe { env::remove_var("HF_ENDPOINT") };
     }
 
-    /// 真实请求镜像站，验证 hf-hub 实际使用了 HF_ENDPOINT
+    /// 验证镜像站可达（需要网络）
     ///
-    /// 该测试会发起网络请求，默认 ignore，手动运行：
     /// cargo test --lib utils::env_guard::tests::test_hf_endpoint_mirror_reachable -- --nocapture --ignored
     #[tokio::test]
+    #[ignore]
     async fn test_hf_endpoint_mirror_reachable() {
         let _guard = HfEndpointGuard::new("https://hf-mirror.com");
 
@@ -110,16 +105,11 @@ mod tests {
             .build()
             .expect("构建 ApiBuilder 失败");
 
-        // 拉取一个极小的公开文件来确认镜像可达
-        let repo = api.model("Qwen/Qwen3-4B-Instruct-2507".to_string());
-        let result = repo.get("config.json").await;
+        let result = api
+            .model("Qwen/Qwen3-4B-Instruct-2507".to_string())
+            .get("config.json")
+            .await;
 
-        match &result {
-            Ok(path) => println!("✅ 镜像可达，文件缓存至：{}", path.display()),
-            Err(e) => println!("❌ 镜像请求失败：{e}"),
-        }
-
-        // 不强制 assert，让用户通过输出判断
-        dbg!(&result.is_ok());
+        dbg!(result.is_ok());
     }
 }

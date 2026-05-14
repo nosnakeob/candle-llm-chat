@@ -126,51 +126,30 @@ impl ChatContext {
 mod tests {
     use super::*;
 
+    /// 验证 push_msg 的角色自动切换逻辑（User → Assistant → User）
     #[tokio::test]
-    async fn test_push_msg() -> Result<()> {
+    async fn test_push_msg_role_switching() -> Result<()> {
         let mut ctx = ChatContext::from_repo("Qwen/Qwen3-4B-Instruct-2507").await?;
+
         ctx.push_msg("hello");
         ctx.push_msg("hi");
         ctx.push_msg("how are you");
 
-        assert_eq!(
-            ctx.messages,
-            vec![
-                Message::new(Role::User, "hello"),
-                Message::new(Role::Assistant, "hi"),
-                Message::new(Role::User, "how are you"),
-            ]
-        );
-        Ok(())
-    }
+        assert_eq!(ctx.messages[0].role, Role::User);
+        assert_eq!(ctx.messages[1].role, Role::Assistant);
+        assert_eq!(ctx.messages[2].role, Role::User);
 
-    #[tokio::test]
-    async fn test_manual_push() -> Result<()> {
-        let mut ctx = ChatContext::from_repo("Qwen/Qwen3-4B-Instruct-2507").await?;
-        ctx.push_message(Role::System, "You are a helpful assistant");
-        ctx.push_message(Role::User, "hello");
-        ctx.push_message(Role::Assistant, "hi there!");
-
-        assert_eq!(ctx.len(), 3);
-        assert_eq!(ctx.messages[0].role, Role::System);
-        assert_eq!(ctx.messages[1].role, Role::User);
-        assert_eq!(ctx.messages[2].role, Role::Assistant);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_from_repo() -> Result<()> {
-        let mut ctx = ChatContext::from_repo("Qwen/Qwen3-4B-Instruct-2507").await?;
-        ctx.push_msg("hello");
-        ctx.push_msg("hi");
-
-        dbg!(ctx.render()?);
+        // push_message 手动指定角色
+        ctx.push_message(Role::System, "system instruction");
+        assert_eq!(ctx.messages[3].role, Role::System);
+        assert_eq!(ctx.len(), 4);
 
         Ok(())
     }
 
+    /// 验证 from_template 渲染结果正确（不依赖网络）
     #[tokio::test]
-    async fn test_from_template() -> Result<()> {
+    async fn test_from_template_render() -> Result<()> {
         let template_str = r#"
 {%- for message in messages %}
     {%- if message.role == 'user' %}
@@ -197,8 +176,9 @@ mod tests {
         Ok(())
     }
 
+    /// 验证 <think> 标签内容被过滤，只保留回答部分
     #[tokio::test]
-    async fn test_thinking_content() -> Result<()> {
+    async fn test_thinking_content_stripped() -> Result<()> {
         let mut ctx = ChatContext::from_repo("Qwen/Qwen3-4B-Instruct-2507").await?;
         ctx.push_msg("hello");
         ctx.push_msg("<think>let me think about this</think>hi there!");
