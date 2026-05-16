@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la .github/)",
+      "Bash(ls docker*)",
+      "Bash(ls Jenkinsfile*)",
+      "Bash(ls .travis*)",
+      "Bash(ls Makefile*)",
+      "Bash(cp src/lib.rs src/lib.rs.full)",
+      "Bash(cp Cargo.toml Cargo.toml.full)",
+      "Bash(cp src/pipe.rs src/pipe.rs.full)",
+      "Bash(cp src/utils/chat.rs src/utils/chat.rs.full)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git reset *)",
+      "Bash(yes)",
+      "Bash(cp src/lib.rs src/lib.rs.tmp)",
+      "Bash(grep -v 'pub mod qwen3_vl' src/lib.rs.tmp)",
+      "Bash(cp src/lib.rs.tmp src/lib.rs)",
+      "Bash(rm src/lib.rs.tmp)"
+    ]
+  }
+}
