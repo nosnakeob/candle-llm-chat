@@ -16,14 +16,14 @@ use futures_core::stream::Stream;
 use std::pin::Pin;
 use tracing::info;
 
-use crate::pipe::TextGeneration;
+use crate::pipe::ChatPipeline;
 use crate::tools::{FileReadTool, ToolCallParser, ToolRegistry, WebFetchTool};
 
 /// 最大工具调用轮次，防止模型陷入无限循环
 const MAX_TOOL_ROUNDS: usize = 10;
 
 pub struct Agent {
-    pipe: TextGeneration,
+    pipe: ChatPipeline,
     tools: ToolRegistry,
     /// 工具调用系统的 system prompt 片段
     tool_system_prompt: String,
@@ -49,7 +49,7 @@ impl Agent {
     pub async fn with_model_and_tools(model_id: &str, tools: ToolRegistry) -> Result<Self> {
         let tool_system_prompt = tools.system_prompt_snippet();
         Ok(Self {
-            pipe: TextGeneration::with_default_config(model_id).await?,
+            pipe: ChatPipeline::with_default_config(model_id).await?,
             tools,
             tool_system_prompt,
         })
