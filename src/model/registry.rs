@@ -7,12 +7,14 @@ use std::{collections::HashMap, str::FromStr};
 #[derive(Debug, Deserialize)]
 pub struct ModelRegistryRaw {
     pub qwen3: HashMap<String, HubInfoRaw>,
+    pub qwen3_vl: Option<HashMap<String, HubInfoRaw>>,
     pub llama: Option<HashMap<String, HubInfoRaw>>,
 }
 
 #[derive(Debug)]
 pub struct ModelRegistry {
     pub qwen3: HashMap<String, HubInfo>,
+    pub qwen3_vl: Option<HashMap<String, HubInfo>>,
     pub llama: Option<HashMap<String, HubInfo>>,
 }
 
@@ -36,6 +38,14 @@ impl ModelRegistry {
             .map(|(k, v)| (k, HubInfo::from(v)))
             .collect();
 
+        // 处理 qwen3_vl 系列
+        let qwen3_vl = raw.qwen3_vl.map(|mut vl_models| {
+            Self::fill_arch_tokenizer_repos(&mut vl_models);
+            vl_models.into_iter()
+                .map(|(k, v)| (k, HubInfo::from(v)))
+                .collect()
+        });
+
         // 处理 llama 系列
         let llama = raw.llama.map(|mut llama_models| {
             Self::fill_arch_tokenizer_repos(&mut llama_models);
@@ -44,7 +54,7 @@ impl ModelRegistry {
                 .collect()
         });
 
-        Self { qwen3, llama }
+        Self { qwen3, qwen3_vl, llama }
     }
 
     /// 为特定架构的模型填充 tokenizer_repo
@@ -106,11 +116,14 @@ impl ModelRegistry {
 
         let models = match ModelArch::from_str(arch_str)? {
             ModelArch::Qwen3 => &self.qwen3,
+            ModelArch::Qwen3VL => self
+                .qwen3_vl
+                .as_ref()
+                .ok_or_else(|| anyhow!("Qwen3-VL 模型未配置"))?,
             ModelArch::Llama => self
                 .llama
                 .as_ref()
                 .ok_or_else(|| anyhow!("Llama 模型未配置"))?,
-            _ => bail!("不支持的模型架构: {}", arch_str),
         };
 
         match variant {
@@ -147,7 +160,7 @@ mod tests {
 
         // 获取默认模型（只传架构名）
         let default_qwen3 = registry.get("qwen3")?;
-        assert_eq!(default_qwen3.model_repo, "Qwen/Qwen3-4B-Instruct-2507");
+        assert_eq!(default_qwen3.model_repo, "Qwen/Qwen3-8B-GGUF");
         assert!(default_qwen3.default);
 
         // 不存在的架构和变体均返回错误

@@ -49,6 +49,8 @@ impl From<HubInfoRaw> for HubInfo {
 #[strum(serialize_all = "lowercase")]
 pub enum ModelArch {
     Qwen3,
+    #[strum(serialize = "qwen3_vl")]
+    Qwen3VL,
     Llama,
 }
 

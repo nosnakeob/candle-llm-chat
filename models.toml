@@ -50,3 +50,10 @@ model_file = "Qwen3-32B-Q4_K_M.gguf"
 # model_file = "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"
 # tokenizer_repo = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 # default = true
+
+# === Qwen3-VL 系列 ===
+[qwen3_vl]
+
+[qwen3_vl.2b_base]
+model_repo = "Qwen/Qwen3-VL-2B-Instruct"
+default = true

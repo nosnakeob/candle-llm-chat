@@ -130,6 +130,9 @@ impl ModelLoader {
                 let model = Qwen3Model::new(&config, vb)?;
                 Box::new(model)
             }
+            ModelArch::Qwen3VL => {
+                bail!("Qwen3-VL safetensors 使用专用管线加载，不通过 ModelLoader")
+            }
             ModelArch::Llama => {
                 bail!("Llama safetensors support not yet implemented");
             }
