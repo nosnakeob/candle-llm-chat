@@ -1,4 +1,9 @@
 {
+  "env": {
+    "CC": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.43.34808\\bin\\Hostx64\\x64\\cl.exe",
+    "LIB": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.43.34808\\lib\\x64;C:\\Program Files (x86)\\Windows Kits\\NETFXSDK\\4.8\\lib\\um\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\lib\\10.0.26100.0\\ucrt\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\lib\\10.0.26100.0\\um\\x64",
+    "INCLUDE": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.43.34808\\include;C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\VS\\include;C:\\Program Files (x86)\\Windows Kits\\10\\include\\10.0.26100.0\\ucrt;C:\\Program Files (x86)\\Windows Kits\\10\\include\\10.0.26100.0\\um;C:\\Program Files (x86)\\Windows Kits\\10\\include\\10.0.26100.0\\shared;C:\\Program Files (x86)\\Windows Kits\\10\\include\\10.0.26100.0\\winrt;C:\\Program Files (x86)\\Windows Kits\\10\\include\\10.0.26100.0\\cppwinrt;C:\\Program Files (x86)\\Windows Kits\\NETFXSDK\\4.8\\include\\um"
+  },
   "permissions": {
     "allow": [
       "Bash(ls -la .github/)",
@@ -17,7 +22,24 @@
       "Bash(cp src/lib.rs src/lib.rs.tmp)",
       "Bash(grep -v 'pub mod qwen3_vl' src/lib.rs.tmp)",
       "Bash(cp src/lib.rs.tmp src/lib.rs)",
-      "Bash(rm src/lib.rs.tmp)"
+      "Bash(rm src/lib.rs.tmp)",
+      "Bash(git push *)",
+      "Bash(git checkout *)",
+      "Bash(python *)",
+      "Bash(gh api repos/vercel-labs/skills/contents/skills/*)",
+      "Read",
+      "Glob",
+      "Grep",
+      "WebSearch",
+      "WebFetch",
+      "Bash(cargo build *)",
+      "Bash(cargo test *)",
+      "Bash(cargo clean *)",
+      "Bash(taskkill /F /IM cargo.exe)",
+      "Bash(taskkill /F /IM rustc.exe)",
+      "Bash(tasklist /v)",
+      "Bash(cargo check *)",
+      "Bash(HF_ENDPOINT=\"https://hf-mirror.com\" cargo test --lib qwen3_vl::tests::test_chat_with_real_image -- --nocapture --ignored)"
     ]
   }
 }
