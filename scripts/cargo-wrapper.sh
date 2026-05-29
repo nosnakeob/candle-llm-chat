@@ -1,18 +1,32 @@
 #!/usr/bin/env bash
-# 在 Git Bash 下运行 cargo 前自动加载 VS 环境
-# 检测标准：MSVC 的 link.exe 能正常识别则跳过
+# MSVC 环境自动加载：检测 link.exe 是否为 MSVC 版，不是则加载 vcvars64.bat
+# 兜底：cmd.exe 不可用时（如 Windows 安全策略限制），直接配置 PATH
 
-CMD="$*"
+set -o pipefail
 
-if [[ ! "$CMD" =~ ^cargo ]]; then
+if [[ "$1" != "cargo" ]]; then
   exit 0
 fi
 
-# 检查当前 link.exe 是不是 MSVC 版
-if link --version 2>&1 | grep -qi microsoft 2>/dev/null; then
-  exit 0
-fi
+link --version 2>&1 | grep -qi microsoft && exit 0
 
-VS_BAT="C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat"
+_set_vs_env_via_cmd() {
+  local VS_BAT="C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat"
+  exec cmd.exe //c "\"$VS_BAT\" >nul && $*"
+}
 
-exec cmd.exe //c "\"$VS_BAT\" >nul && $CMD"
+_set_vs_env_direct() {
+  local MSVC_TOOLS="C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.43.34808"
+  export PATH="$MSVC_TOOLS/bin/Hostx64/x64:$PATH"
+  cl.exe --help >/dev/null 2>&1 || {
+    echo "cargo-wrapper: 错误 - 无法配置 MSVC 编译环境" >&2
+    exit 1
+  }
+  exec "$@"
+}
+
+_set_vs_env_via_cmd "$@" 2>/dev/null
+
+# 降级：cmd.exe 不可用，直接 PATH 添加 cl.exe（INCLUDE/LIB 由 .cargo/config.toml [env] 提供）
+echo "cargo-wrapper: cmd.exe 不可用，使用 direct PATH 模式" >&2
+_set_vs_env_direct "$@"
