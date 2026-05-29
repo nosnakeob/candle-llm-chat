@@ -1,286 +1,606 @@
-use anyhow::{Context, Result};
-// [修改 1] 引入 IndexOp 以修复 E0599 报错 (使得 Tensor 可以使用 .i() 方法)
+//! Qwen3-VL 多模态推理管线
+//!
+//! 基于 candle-transformers 的 `Qwen3VLModel`，提供图文对话能力。
+//!
+//! # 设计说明
+//!
+//! Qwen3VLModel 的 forward 签名与普通文本模型不同（9 参数，`&self`），
+//! 因此不通过 `ModelInference` trait 集成，而是作为独立管线。
+//! KV cache 通过内部 `Arc<Mutex<KvCache>>` 管理，无需外部清理。
+
+use anyhow::{Context, Error, Result};
+use async_stream::try_stream;
 use candle::{DType, Device, IndexOp, Tensor};
+use candle_examples::token_output_stream::TokenOutputStream;
 use candle_nn::VarBuilder;
+use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::models::qwen3_vl::{Config as Qwen3VLConfig, Qwen3VLModel};
-use hf_hub::{Repo, RepoType, api::sync::Api};
-use tokenizers::Tokenizer;
+use futures_core::stream::Stream;
+use hf_hub::api::tokio::ApiBuilder;
+use serde_json::Value;
+use std::path::Path;
+use std::pin::Pin;
+use tracing::info;
 
-#[test]
-fn t_qwen_vl() -> Result<()> {
-    // 1. 初始化设备
-    let device = Device::new_cuda(0).unwrap_or(Device::Cpu);
+use crate::model::config::InferenceConfig;
+use crate::model::registry::ModelRegistry;
+use crate::utils::chat::ChatContext;
+use crate::utils::load::{ApiRepoExt, load_tokenizer};
 
-    // 2. 从 HuggingFace Hub 下载 Qwen3-VL-8B-Instruct-FP8 模型
-    let api = Api::new()?;
-    let repo = api.repo(Repo::with_revision(
-        "Qwen/Qwen3-VL-8B-Instruct-FP8".to_string(),
-        RepoType::Model,
-        "main".to_string(),
-    ));
+// ─── 图像预处理常量 ───────────────────────────────────────────────────────────────
 
-    println!("正在加载配置文件和 Tokenizer...");
-    let config_file = repo.get("config.json")?;
-    let tokenizer_file = repo.get("tokenizer.json")?;
-    // ================= [修复点开始] =================
-    // 先将 config.json 解析为动态的 JSON 对象，以便进行修改
-    let mut config_value: serde_json::Value =
-        serde_json::from_reader(std::fs::File::open(config_file)?)?;
+const IMAGE_MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
+const IMAGE_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 
-    // tie_word_embeddings 在 text_config 子对象里，不在顶层
-    if let Some(text_config) = config_value
-        .as_object_mut()
-        .and_then(|o| o.get_mut("text_config"))
-        .and_then(|v| v.as_object_mut())
-    {
-        if !text_config.contains_key("tie_word_embeddings") {
-            text_config.insert(
-                "tie_word_embeddings".to_string(),
-                serde_json::Value::Bool(false),
-            );
+// ─── 预处理结果 ─────────────────────────────────────────────────────────────────
+
+struct Qwen3VLPreprocessed {
+    pixel_values: Option<Tensor>,
+    image_grid_thw: Option<Tensor>,
+    num_placeholders: usize,
+}
+
+impl Qwen3VLPreprocessed {
+    fn none() -> Self {
+        Self { pixel_values: None, image_grid_thw: None, num_placeholders: 0 }
+    }
+}
+
+// ─── Qwen3VL 结构体 ──────────────────────────────────────────────────────────────
+
+pub struct Qwen3VL {
+    model: Qwen3VLModel,
+    tokenizer: tokenizers::Tokenizer,
+    tos: TokenOutputStream,
+    logits_processor: LogitsProcessor,
+    ctx: ChatContext,
+    infer_conf: InferenceConfig,
+    eos_token_id: u32,
+
+    // Vision 配置
+    patch_size: usize,
+    spatial_merge_size: usize,
+    temporal_patch_size: usize,
+    image_token_id: u32,
+}
+
+impl Drop for Qwen3VL {
+    fn drop(&mut self) {
+        // 同步 CUDA 设备，防止 cuDNN handle 在 drop 时因未完成的内核而崩溃
+        let _ = self.infer_conf.device.synchronize();
+    }
+}
+
+impl Qwen3VL {
+    pub async fn new(model_id: &str, config: InferenceConfig) -> Result<Self> {
+        let registry = ModelRegistry::new()?;
+        let hub_info = registry.get(model_id)?;
+        let device = &config.device;
+
+        let api = ApiBuilder::from_env().build()?;
+        let repo = api.model(hub_info.model_repo.clone());
+
+        // 下载并解析 config.json
+        let config_path = repo.get("config.json").await?;
+        let config_content = std::fs::read_to_string(&config_path)?;
+        let mut config_value: Value = serde_json::from_str(&config_content)?;
+
+        // 修复 tie_word_embeddings 缺失问题
+        if let Some(text_config) = config_value
+            .as_object_mut()
+            .and_then(|o| o.get_mut("text_config"))
+            .and_then(|v| v.as_object_mut())
+        {
+            if !text_config.contains_key("tie_word_embeddings") {
+                text_config.insert("tie_word_embeddings".to_string(), Value::Bool(false));
+            }
+            // 限制 max_position_embeddings 以减少 KV cache 显存占用
+            let should_limit = text_config
+                .get("max_position_embeddings")
+                .and_then(|v| v.as_u64())
+                .map_or(false, |n| n > 8192);
+            if should_limit {
+                text_config.insert(
+                    "max_position_embeddings".to_string(),
+                    Value::Number(serde_json::Number::from(8192u64)),
+                );
+            }
         }
-        // NOTE: 如果以后还报其他字段缺失的错，在这里继续补齐 text_config 的字段
+
+        let vl_config: Qwen3VLConfig = serde_json::from_value(config_value.clone())?;
+
+        // 加载模型权重
+        let model_files = match repo.get(&hub_info.model_file).await {
+            Ok(single_file) => vec![single_file],
+            Err(_) => repo.get_safetensors().await?,
+        };
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&model_files, DType::BF16, device)? };
+        let model = Qwen3VLModel::new(&vl_config, vb)?;
+
+        // 加载 tokenizer
+        let tokenizer = load_tokenizer(&hub_info.tokenizer_repo)?;
+
+        // eos_token_id
+        let eos_token_id = config_value
+            .get("eos_token_id")
+            .or_else(|| config_value.get("text_config").and_then(|tc| tc.get("eos_token_id")))
+            .and_then(|x| x.as_u64())
+            .unwrap_or(151643) as u32;
+
+        let patch_size = vl_config.vision_config.patch_size;
+        let spatial_merge_size = vl_config.vision_config.spatial_merge_size;
+        let temporal_patch_size = vl_config.vision_config.temporal_patch_size;
+        let image_token_id = vl_config.image_token_id;
+
+        let logits_processor =
+            LogitsProcessor::new(config.seed, Some(config.temperature), config.top_p);
+        let ctx = ChatContext::from_repo(&hub_info.tokenizer_repo).await?;
+        let tos = TokenOutputStream::new(tokenizer.clone());
+
+        Ok(Self {
+            model, tokenizer, tos, logits_processor, ctx, infer_conf: config, eos_token_id,
+            patch_size, spatial_merge_size, temporal_patch_size, image_token_id,
+        })
     }
 
-    // 从补全后的 JSON 动态对象再反序列化为严格的 Rust Struct
-    let config: Qwen3VLConfig = serde_json::from_value(config_value)?;
-    // ================= [修复点结束] =================
-    let tokenizer = Tokenizer::from_file(tokenizer_file).map_err(|e| anyhow::anyhow!(e))?;
+    pub async fn with_default_config(model_id: &str) -> Result<Self> {
+        Self::new(model_id, InferenceConfig::default()).await
+    }
 
-    println!("正在加载 FP8 模型权重...");
-    // 从 index.json 读取分片文件列表，避免 repo.info() 发起网络请求
-    let index_path = repo.get("model.safetensors.index.json").map_err(anyhow::Error::msg)?;
-    let index_json: serde_json::Value =
-        serde_json::from_reader(std::fs::File::open(index_path)?)?;
-    let weight_map = index_json
-        .get("weight_map")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| anyhow::anyhow!("model.safetensors.index.json 中没有 weight_map"))?;
-    let mut shard_names: Vec<String> = weight_map
-        .values()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    shard_names.sort();
-    let weights: Vec<_> = shard_names
-        .iter()
-        .map(|name| repo.get(name.as_str()).map_err(anyhow::Error::msg))
-        .collect::<Result<_>>()?;
+    pub async fn default() -> Result<Self> {
+        Self::with_default_config("qwen3_vl").await
+    }
 
-    let dtype = DType::BF16;
-    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&weights, dtype, &device)? };
-    let mut model = Qwen3VLModel::new(&config, vb)?;
+    // ─── 公有 API ────────────────────────────────────────────────────────────
 
-    // 测试 1：纯文本对话
-    println!("\n=== [测试 1: 纯文本对话] ===");
-    chat_text(
-        &mut model,
-        &tokenizer,
-        &device,
-        "你好！请用一句话介绍一下你自己。",
-    )?;
+    /// 完整响应对话
+    pub fn chat_full(&mut self, prompt: &str, images: Option<&[&str]>) -> Result<String> {
+        let has_images = images.map_or(false, |imgs| !imgs.is_empty());
 
-    // 测试 2：单图对话 (这里引入了真实的图片读取)
-    println!("\n===[测试 2: 图片对话] ===");
-    // 建议你在项目根目录下放一张 test.jpg，如果没有会回退到默认 448x448 分辨率
-    chat_image(
-        &mut model,
-        &tokenizer,
-        &device,
-        "详细描述一下这张图片。",
-        "test.jpg",
-    )?;
+        let pp = if has_images {
+            self.preprocess_images(images.unwrap())?
+        } else {
+            Qwen3VLPreprocessed::none()
+        };
 
-    // 测试 3：视频对话
-    println!("\n=== [测试 3: 视频对话] ===");
-    chat_video(
-        &mut model,
-        &tokenizer,
-        &device,
-        "视频里的人在做什么？",
-        "test.mp4",
-    )?;
+        let full_prompt = if pp.num_placeholders > 0 {
+            build_vision_prompt(prompt, pp.num_placeholders)
+        } else {
+            prompt.to_string()
+        };
 
-    Ok(())
-}
+        self.ctx.push_msg(&full_prompt);
+        let rendered = self.ctx.render()?;
 
-/// 简单文本对话
-fn chat_text(
-    model: &mut Qwen3VLModel,
-    tokenizer: &Tokenizer,
-    device: &Device,
-    prompt: &str,
-) -> Result<()> {
-    let prompt_str = format!(
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
-        prompt
-    );
+        let answer = self.generate_inner(&rendered, pp)?;
 
-    let tokens = tokenizer
-        .encode(prompt_str, true)
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let input_ids = Tensor::new(tokens.get_ids(), device)?.unsqueeze(0)?;
+        self.ctx.push_msg(&answer);
+        Ok(answer)
+    }
 
-    println!("User: {}", prompt);
-    generate_and_print(model, tokenizer, device, &input_ids, None, None)
-}
+    /// 流式对话
+    pub fn chat<'a>(
+        &'a mut self,
+        prompt: &'a str,
+        images: Option<&[&'a str]>,
+    ) -> Pin<Box<dyn Stream<Item = Result<String>> + 'a>> {
+        let has_images = images.map_or(false, |imgs| !imgs.is_empty());
 
-///[代码图片测试] 升级版：动态读取图片大小，分配恰当的 Vision Patch 长度
-fn chat_image(
-    model: &mut Qwen3VLModel,
-    tokenizer: &Tokenizer,
-    device: &Device,
-    prompt: &str,
-    img_path: &str,
-) -> Result<()> {
-    println!("User: [图片: {}] {}", img_path, prompt);
+        let pp = match if has_images {
+            self.preprocess_images(images.unwrap())
+        } else {
+            Ok(Qwen3VLPreprocessed::none())
+        } {
+            Ok(pp) => pp,
+            Err(e) => return Box::pin(try_stream! { yield format!("[图像预处理失败: {}]", e); }),
+        };
 
-    // [新增] 读取真实图片获取高宽，以此进行 Qwen3-VL 动态分辨率的计算
-    let (img_w, img_h) = match image::io::Reader::open(img_path) {
-        Ok(reader) => match reader.into_dimensions() {
-            Ok(dim) => dim,
-            Err(_) => {
-                println!("⚠️ 无法读取图片尺寸，使用默认尺寸 448x448");
-                (448, 448)
+        let full_prompt = if pp.num_placeholders > 0 {
+            build_vision_prompt(prompt, pp.num_placeholders)
+        } else {
+            prompt.to_string()
+        };
+
+        self.ctx.push_msg(&full_prompt);
+
+        let rendered = match self.ctx.render() {
+            Ok(r) => r,
+            Err(e) => return Box::pin(try_stream! { yield format!("[{}]", e); }),
+        };
+
+        let prompt = rendered;
+        let device = self.infer_conf.device.clone();
+        let sample_len = self.infer_conf.sample_len;
+        let eos_token_id = self.eos_token_id;
+
+        let prompt_tokens = match self.tokens_from_render(&prompt) {
+            Ok(t) => t,
+            Err(e) => return Box::pin(try_stream! { yield format!("[{}]", e); }),
+        };
+        let prompt_len = prompt_tokens.len();
+
+        let continuous_img_pad = if pp.num_placeholders > 0 {
+            find_image_token_span(&prompt_tokens, self.image_token_id)
+        } else {
+            vec![]
+        };
+
+        Box::pin(try_stream! {
+            let prompt = prompt;
+            let mut token_ids = prompt_tokens;
+            let mut answer = String::with_capacity(1024);
+            let start = std::time::Instant::now();
+
+            // 预填充
+            let input = Tensor::new(token_ids.as_slice(), &device)?.unsqueeze(0)?;
+            let seq_len = input.dim(1)?;
+
+            let logits = self.model.forward(
+                &input, pp.pixel_values, None, pp.image_grid_thw, None,
+                vec![seq_len], continuous_img_pad, vec![], &[0],
+            )?;
+
+            let mut next_token = {
+                let l = logits.squeeze(1)?.i(0)?.to_dtype(DType::F32)?;
+                self.logits_processor.sample(&l)?
+            };
+
+            for index in 0..sample_len {
+                if next_token == eos_token_id { break; }
+
+                if let Some(t) = self.tos.next_token(next_token)? {
+                    answer.push_str(&t);
+                    yield t;
+                }
+                token_ids.push(next_token);
+
+                let input = Tensor::new(&[next_token], &device)?.unsqueeze(0)?;
+                let pos = prompt_len + index;
+
+                let logits = self.model.forward(
+                    &input, None, None, None, None,
+                    vec![1], vec![], vec![], &[pos],
+                )?;
+
+                next_token = {
+                    let l = logits.i(0)?.to_dtype(DType::F32)?;
+                    self.logits_processor.sample(&l)?
+                };
             }
-        },
-        Err(_) => {
-            println!("⚠️ 找不到图片 {}，使用默认尺寸 448x448", img_path);
-            (448, 448)
-        }
-    };
 
-    // Qwen3-VL / Qwen2-VL 的 spatial_merge_size=2，patch_size=14
-    // 相当于每 28x28 像素为一个空间 Block
-    let block_size = 28;
-    let blocks_w = (img_w + block_size - 1) / block_size;
-    let blocks_h = (img_h + block_size - 1) / block_size;
-    let num_patches = blocks_w * blocks_h;
+            if let Some(t) = self.tos.decode_rest()? {
+                if !t.is_empty() { answer.push_str(&t); yield t; }
+            }
 
-    let image_tokens = format!(
-        "<|vision_start|>{}<|vision_end|>",
-        "<|image_pad|>".repeat(num_patches as usize)
-    );
-    let prompt_str = format!(
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{}{}<|im_end|>\n<|im_start|>assistant\n",
-        image_tokens, prompt
-    );
+            self.ctx.push_msg(&answer);
+            self.tos.clear();
 
-    let tokens = tokenizer
-        .encode(prompt_str, true)
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let input_ids = Tensor::new(tokens.get_ids(), device)?.unsqueeze(0)?;
+            let elapsed = start.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                info!("speed: {:.2} token/s, total tokens: {}",
+                    (token_ids.len() - prompt_len) as f64 / elapsed, token_ids.len());
+            }
+        })
+    }
 
-    // 构造维度与图片高度和宽度匹配的 Dummy Pixel Tensor
-    let dummy_pixel_values = Tensor::zeros((num_patches as usize, 1176), DType::BF16, device)?;
+    // ─── 内部生成 ────────────────────────────────────────────────────────────
 
-    // image_grid_thw 定义了图像在 Time, Height, Width 三个维度上的 Patch 数量
-    let dummy_grid_thw = Tensor::new(&[1u32, blocks_h, blocks_w], device)?.unsqueeze(0)?;
+    /// 内部生成函数 - 分离以便借用法
+    fn generate_inner(&mut self, prompt: &str, pp: Qwen3VLPreprocessed) -> Result<String> {
+        let mut token_ids = self.str2tokens(prompt)?;
+        let continuous_img_pad = if pp.num_placeholders > 0 {
+            find_image_token_span(&token_ids, self.image_token_id)
+        } else {
+            vec![]
+        };
 
-    generate_and_print(
-        model,
-        tokenizer,
-        device,
-        &input_ids,
-        Some(&dummy_pixel_values),
-        Some(&dummy_grid_thw),
-    )
-}
+        let prompt_len = token_ids.len();
+        let mut answer = String::with_capacity(1024);
+        let start = std::time::Instant::now();
 
-/// 带视频对话
-fn chat_video(
-    model: &mut Qwen3VLModel,
-    tokenizer: &Tokenizer,
-    device: &Device,
-    prompt: &str,
-    vid_path: &str,
-) -> Result<()> {
-    println!("User: [视频: {}] {}", vid_path, prompt);
+        // 预填充 - 借用 self.model (&self) 完成 forward 后释放
+        let input = Tensor::new(token_ids.as_slice(), &self.infer_conf.device)?.unsqueeze(0)?;
+        let seq_len = input.dim(1)?;
 
-    let num_video_patches = 4 * 64;
-    let video_tokens = format!(
-        "<|vision_start|>{}<|vision_end|>",
-        "<|video_pad|>".repeat(num_video_patches)
-    );
-
-    let prompt_str = format!(
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{}{}<|im_end|>\n<|im_start|>assistant\n",
-        video_tokens, prompt
-    );
-
-    let tokens = tokenizer
-        .encode(prompt_str, true)
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let input_ids = Tensor::new(tokens.get_ids(), device)?.unsqueeze(0)?;
-
-    let dummy_pixel_values = Tensor::zeros((num_video_patches, 1176), DType::BF16, device)?;
-    let dummy_grid_thw = Tensor::new(&[4u32, 8u32, 8u32], device)?.unsqueeze(0)?;
-
-    generate_and_print(
-        model,
-        tokenizer,
-        device,
-        &input_ids,
-        Some(&dummy_pixel_values),
-        Some(&dummy_grid_thw),
-    )
-}
-
-/// 最小化的自回归贪心解码循环
-fn generate_and_print(
-    model: &mut Qwen3VLModel,
-    tokenizer: &Tokenizer,
-    device: &Device,
-    input_ids: &Tensor,
-    pixel_values: Option<&Tensor>,
-    image_grid_thw: Option<&Tensor>,
-) -> Result<()> {
-    print!("Assistant: ");
-    let mut current_ids = input_ids.clone();
-
-    let eos_id = tokenizer.token_to_id("<|im_end|>").unwrap_or(151645);
-    let max_tokens = 100;
-
-    for _ in 0..max_tokens {
-        // 计算当前序列长度和传入的 Position IDs
-        let seq_len = current_ids.dim(1)?;
-        let input_pos: Vec<usize> = (0..seq_len).collect();
-
-        // [修改 2] 补全 forward 所有的 9 个参数以修复 E0061 报错
-        // 我们利用 .cloned() 将 Option<&Tensor> 转化为 Option<Tensor>
-        // 其他不需要的参数填入 None 或者 vec![] 让编译器自适应推导
-        let logits = model.forward(
-            &current_ids,            // input_ids
-            pixel_values.cloned(),   // pixel_values
-            image_grid_thw.cloned(), // image_grid_thw
-            None,                    // video_pixel_values
-            None,                    // video_grid_thw
-            vec![],                  // cu_seqlens 等其他 Vec 占位
-            vec![],                  // image_sizes: Vec<Vec<(usize, usize)>>
-            vec![],                  // video_sizes: Vec<Vec<(usize, usize)>>
-            &input_pos,              // input_pos
+        let logits = self.model.forward(
+            &input, pp.pixel_values, None, pp.image_grid_thw, None,
+            vec![seq_len], continuous_img_pad, vec![], &[0],
         )?;
 
-        let seq_len = logits.dim(1)?;
-        // .i() 此时生效，因为我们引用了 candle::IndexOp
-        let logits = logits.i((0, seq_len - 1, ..))?;
+        // 采样 - 借用 self.logits_processor (&mut self) 后释放
+        // 注意: forward_embeds 已返回最后 token 的 logits (1, vocab_size)
+        let mut next_token = {
+            let l = logits.squeeze(1)?.i(0)?.to_dtype(DType::F32)?;
+            self.logits_processor.sample(&l)?
+        };
 
-        let next_token_id = logits.argmax(0)?.to_scalar::<u32>()?;
+        // 解码循环 - 交替借用 self.model, self.logits_processor, self.tos
+        for index in 0..self.infer_conf.sample_len {
+            if next_token == self.eos_token_id { break; }
 
-        if next_token_id == eos_id {
-            break;
+            // 输出当前 token - 借用 self.tos
+            let token_str = self.tos.next_token(next_token)?;
+            if let Some(t) = &token_str { answer.push_str(t); }
+            drop(token_str);
+
+            token_ids.push(next_token);
+
+            // 生成下一个 token - 借用 self.model
+            let input = Tensor::new(&[next_token], &self.infer_conf.device)?.unsqueeze(0)?;
+            let pos = prompt_len + index;
+
+            let logits = self.model.forward(
+                &input, None, None, None, None,
+                vec![1], vec![], vec![], &[pos],
+            )?;
+
+            // 采样 - 借用 self.logits_processor
+            next_token = {
+                let l = logits.i(0)?.to_dtype(DType::F32)?;
+                self.logits_processor.sample(&l)?
+            };
         }
 
-        if let Some(text) = tokenizer.decode(&[next_token_id], true).ok() {
-            print!("{}", text);
-            use std::io::Write;
-            std::io::stdout().flush()?;
+        // 解码剩余
+        if let Some(t) = self.tos.decode_rest()? {
+            if !t.is_empty() { answer.push_str(&t); }
         }
 
-        let next_token_tensor = Tensor::new(&[next_token_id], device)?.unsqueeze(0)?;
-        current_ids = Tensor::cat(&[&current_ids, &next_token_tensor], 1)?;
+        self.tos.clear();
+
+        let elapsed = start.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            info!("speed: {:.2} token/s, total tokens: {}",
+                (token_ids.len() - prompt_len) as f64 / elapsed, prompt_len);
+        }
+
+        Ok(answer)
     }
-    println!();
-    Ok(())
+
+    // ─── 图像预处理 ──────────────────────────────────────────────────────────
+
+    fn preprocess_images(&self, paths: &[&str]) -> Result<Qwen3VLPreprocessed> {
+        if paths.is_empty() { return Ok(Qwen3VLPreprocessed::none()); }
+
+        let path = paths[0];
+        let img = image::io::Reader::open(path)
+            .context(format!("无法打开图片: {}", path))?
+            .decode()
+            .context(format!("无法解码图片: {}", path))?;
+
+        let block_size = (self.patch_size * self.spatial_merge_size) as u32;
+        let (target_w, target_h) = smart_resize(img.width(), img.height(), block_size);
+
+        let img = img.resize_exact(target_w, target_h, image::imageops::FilterType::CatmullRom);
+        let rgb = img.to_rgb8();
+
+        let h_patches = target_h as usize / self.patch_size;
+        let w_patches = target_w as usize / self.patch_size;
+        let total_patches = h_patches * w_patches;
+        let patch_dim = self.patch_size * self.patch_size * self.temporal_patch_size * 3;
+
+        let mut pixel_data = Vec::with_capacity(total_patches * patch_dim);
+
+        for py in 0..h_patches {
+            for px in 0..w_patches {
+                let y_off = py * self.patch_size;
+                let x_off = px * self.patch_size;
+
+                for c in 0..3 {
+                    let mean = IMAGE_MEAN[c];
+                    let std = IMAGE_STD[c];
+                    for _t in 0..self.temporal_patch_size {
+                        for y in 0..self.patch_size {
+                            for x in 0..self.patch_size {
+                                let pv = rgb.get_pixel(
+                                    (x_off + x) as u32, (y_off + y) as u32,
+                                )[c] as f32;
+                                pixel_data.push((pv / 255.0 - mean) / std);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let pixel_values = Tensor::from_vec(pixel_data, (total_patches, patch_dim), &Device::Cpu)?
+            .to_device(&self.infer_conf.device)?;
+
+        let grid = Tensor::new(&[1u32, h_patches as u32, w_patches as u32], &Device::Cpu)?
+            .unsqueeze(0)?
+            .to_device(&self.infer_conf.device)?;
+
+        let num_placeholders = total_patches / (self.spatial_merge_size * self.spatial_merge_size);
+
+        Ok(Qwen3VLPreprocessed {
+            pixel_values: Some(pixel_values),
+            image_grid_thw: Some(grid),
+            num_placeholders,
+        })
+    }
+
+    fn str2tokens(&self, string: &str) -> Result<Vec<u32>> {
+        Ok(self.tokenizer.encode(string, true).map_err(Error::msg)?.get_ids().to_vec())
+    }
+
+    fn tokens_from_render(&self, rendered: &str) -> Result<Vec<u32>> {
+        self.str2tokens(rendered)
+    }
+}
+
+// ─── 自由函数 ─────────────────────────────────────────────────────────────────
+
+fn build_vision_prompt(prompt: &str, num_placeholders: usize) -> String {
+    let image_tokens: String = (0..num_placeholders).map(|_| "<|image_pad|>").collect();
+    format!("<|vision_start|>{}<|vision_end|>{}", image_tokens, prompt)
+}
+
+fn smart_resize(width: u32, height: u32, factor: u32) -> (u32, u32) {
+    let h = ((height + factor - 1) / factor) * factor;
+    let w = ((width + factor - 1) / factor) * factor;
+    (w.max(factor), h.max(factor))
+}
+
+fn find_image_token_span(tokens: &[u32], image_token_id: u32) -> Vec<Vec<(usize, usize)>> {
+    let positions: Vec<usize> = tokens.iter().enumerate()
+        .filter(|&(_, id)| *id == image_token_id)
+        .map(|(i, _)| i).collect();
+
+    if positions.is_empty() { return vec![]; }
+    let start = positions[0];
+    let end = positions[positions.len() - 1] + 1;
+    vec![vec![(start, end)]]
+}
+
+// ─── 测试 ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_smart_resize() {
+        let factor = 28;
+        assert_eq!(smart_resize(448, 448, factor), (448, 448));
+        assert_eq!(smart_resize(450, 450, factor), (476, 476));
+        assert_eq!(smart_resize(10, 10, factor), (28, 28));
+    }
+
+    #[test]
+    fn test_find_image_token_span() {
+        let tokens = vec![1u32, 2, 3, 151655, 151655, 151655, 4, 5];
+        let spans = find_image_token_span(&tokens, 151655);
+        assert_eq!(spans, vec![vec![(3, 6)]]);
+    }
+
+    #[test]
+    fn test_empty_span() {
+        let tokens = vec![1u32, 2, 3, 4];
+        let spans = find_image_token_span(&tokens, 151655);
+        assert!(spans.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_chat_text() -> Result<()> {
+        let mut cfg = InferenceConfig::default();
+        cfg.temperature = 0.8;
+        cfg.repeat_penalty = 1.0;
+        let mut model = Qwen3VL::new("qwen3_vl", cfg).await?;
+
+        let answer = model.chat_full("What is 2+2?", None)?;
+        println!("Answer: '{}'", answer);
+        assert!(!answer.is_empty());
+        assert!(answer.len() > 3, "answer too short: '{}'", answer);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_chat_with_image() -> Result<()> {
+        let img_path = "test.jpg";
+        if !Path::new(img_path).exists() {
+            println!("跳过测试：找不到 {}", img_path);
+            return Ok(());
+        }
+        let mut model = Qwen3VL::default().await?;
+        let answer = model.chat_full("请描述这张图片", Some(&[img_path]))?;
+        println!("Answer: {}", answer);
+        assert!(!answer.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_chat_with_real_image() -> Result<()> {
+        // 程序化生成一张房屋场景图（网络不可靠时无需外部下载）
+        let tmp_dir = std::env::temp_dir();
+        let img_path = tmp_dir.join("qwen3_vl_test_house.png");
+
+        let mut img = image::ImageBuffer::new(448, 448);
+        // 天空渐变
+        for y in 0..224 {
+            let b = 128 + (y as f32 / 223.0 * 127.0) as u8;
+            for x in 0..448 {
+                img.put_pixel(x, y, image::Rgb([135 - y as u8 / 3, 206 - y as u8 / 3, b]));
+            }
+        }
+        // 草地
+        for y in 224..448 {
+            for x in 0..448 {
+                img.put_pixel(x, y, image::Rgb([34, 139 + (y - 224) as u8 / 8, 34]));
+            }
+        }
+        // 太阳（左上角黄色圆形）
+        for y in 0..120u32 {
+            for x in 0..120u32 {
+                let dx = x as i32 - 60;
+                let dy = y as i32 - 60;
+                if dx * dx + dy * dy <= 2500 {
+                    img.put_pixel(x, y, image::Rgb([255, 255, 0]));
+                }
+            }
+        }
+        // 房子主体（棕色矩形）
+        for y in 180..340 {
+            for x in 120..320 {
+                img.put_pixel(x, y, image::Rgb([139, 90, 43]));
+            }
+        }
+        // 屋顶（红色三角形）
+        for y in 0..100 {
+            let half_width = 100 - y as i32;
+            for x in (120 + half_width)..(320 - half_width) {
+                if x >= 0 && x < 448 && (180 - y as i32) >= 0 {
+                    img.put_pixel(x as u32, 180 - y as u32, image::Rgb([178, 34, 34]));
+                }
+            }
+        }
+        // 门（深棕色矩形）
+        for y in 250..340 {
+            for x in 195..245 {
+                img.put_pixel(x, y, image::Rgb([101, 67, 33]));
+            }
+        }
+        // 窗户（浅蓝色矩形）
+        for y in 210..250 {
+            for x in 140..180 {
+                img.put_pixel(x, y, image::Rgb([173, 216, 230]));
+            }
+        }
+        // 树（树干 + 绿色树冠）
+        for y in 200..380 {
+            for x in 370..385 {
+                img.put_pixel(x, y, image::Rgb([101, 67, 33]));
+            }
+        }
+        for dy in 0..80i32 {
+            for dx in 0..100i32 {
+                let cx = 345 + dx;
+                let cy = 180 + dy;
+                let rx = dx as i32 - 50;
+                let ry = dy as i32 - 40;
+                if rx * rx / 2500 + ry * ry / 1600 <= 1 {
+                    if cx < 448 && cy < 448 {
+                        img.put_pixel(cx as u32, cy as u32, image::Rgb([34, 139, 34]));
+                    }
+                }
+            }
+        }
+        img.save(&img_path)?;
+        println!("测试图片已生成: {:?}", img_path);
+
+        let mut cfg = InferenceConfig::default();
+        cfg.temperature = 0.3;
+        let mut model = Qwen3VL::new("qwen3_vl", cfg).await?;
+        let answer = model.chat_full(
+            "请用一句话描述这张图片里有什么物体",
+            Some(&[img_path.to_str().unwrap()]),
+        )?;
+        println!("Answer: {}", answer);
+        assert!(!answer.is_empty());
+
+        let _ = std::fs::remove_file(&img_path);
+        Ok(())
+    }
 }
