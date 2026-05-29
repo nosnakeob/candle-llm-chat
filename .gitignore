@@ -3,5 +3,6 @@
 .vscode
 .kiro
 .trae
+.zed
 
 Cargo.lock
