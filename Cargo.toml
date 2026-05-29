@@ -19,8 +19,7 @@ candle-nn = "0.10"
 # feat mkl STATUS_DLL_NOT_FOUND
 candle-transformers = { version = "0.10", features = [
     "cuda",
-    "cudnn",
-    # "flash-attn",
+    "flash-attn",
 ] }
 candle-examples = "0.10"
 
