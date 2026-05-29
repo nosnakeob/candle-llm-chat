@@ -16,7 +16,7 @@ use std::fs;
 use std::pin::Pin;
 use tracing::info;
 
-use crate::qwen3_vl::{self, Qwen3VL};
+use crate::model::qwen3_vl::{self, Qwen3VL};
 
 pub struct ChatPipeline {
     model: Box<dyn ModelInference>,
