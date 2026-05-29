@@ -252,24 +252,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_smart_resize() {
-        let factor = 28;
-        assert_eq!(smart_resize(448, 448, factor), (448, 448));
-        assert_eq!(smart_resize(450, 450, factor), (476, 476));
-        assert_eq!(smart_resize(10, 10, factor), (28, 28));
-    }
+    fn test_helpers() {
+        // smart_resize
+        assert_eq!(smart_resize(448, 448, 28), (448, 448));
+        assert_eq!(smart_resize(450, 450, 28), (476, 476));
+        assert_eq!(smart_resize(10, 10, 28), (28, 28));
 
-    #[test]
-    fn test_find_image_token_span() {
+        // find_image_token_span — 有 image token
         let tokens = vec![1u32, 2, 3, 151655, 151655, 151655, 4, 5];
-        let spans = find_image_token_span(&tokens, 151655);
-        assert_eq!(spans, vec![vec![(3, 6)]]);
-    }
+        assert_eq!(find_image_token_span(&tokens, 151655), vec![vec![(3, 6)]]);
 
-    #[test]
-    fn test_empty_span() {
+        // find_image_token_span — 无 image token
         let tokens = vec![1u32, 2, 3, 4];
-        let spans = find_image_token_span(&tokens, 151655);
-        assert!(spans.is_empty());
+        assert!(find_image_token_span(&tokens, 151655).is_empty());
     }
 }
