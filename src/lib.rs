@@ -8,6 +8,5 @@ extern crate serde_default_utils;
 pub mod agent;
 pub mod model;
 pub mod pipe;
-pub mod qwen3_vl;
 pub mod tools;
 pub mod utils;

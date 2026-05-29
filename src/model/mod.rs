@@ -6,6 +6,7 @@ use std::io::{Read, Seek};
 
 pub mod config;
 pub mod hub;
+pub mod qwen3_vl;
 pub mod registry;
 
 /// 视觉模型的配置信息（非视觉模型返回 None）
