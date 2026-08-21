@@ -2,6 +2,8 @@
 linker = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.43.34808\\bin\\Hostx64\\x64\\link.exe"
 
 [env]
+# CUDA 13.x CCCL 要求 MSVC 使用标准预处理器，否则 fatal error C1189
+"NVCC_APPEND_FLAGS" = "-Xcompiler /Zc:preprocessor"
 # 避免 cc-rs 在无 VS 环境的 shell 中找不到 C 编译器
 "CC_x86_64-pc-windows-msvc" = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.43.34808\\bin\\Hostx64\\x64\\cl.exe"
 INCLUDE = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.43.34808\\include;C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\ucrt;C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\shared;C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\um"

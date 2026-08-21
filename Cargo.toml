@@ -24,7 +24,7 @@ candle-transformers = { version = "0.10", features = [
 candle-examples = "0.10"
 
 hf-hub = { version = "0.5", features = ["tokio"] }
-tokenizers = { version = "*", features = ["http"] }
+tokenizers = { version = "0.22", features = ["http"] }
 
 async-stream = "0.3"
 futures-core = "0.3"
