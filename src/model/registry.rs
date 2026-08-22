@@ -8,14 +8,16 @@ use std::{collections::HashMap, str::FromStr};
 pub struct ModelRegistryRaw {
     pub qwen3: HashMap<String, HubInfoRaw>,
     pub qwen3_vl: Option<HashMap<String, HubInfoRaw>>,
-    pub llama: Option<HashMap<String, HubInfoRaw>>,
+    pub qwen3_moe: Option<HashMap<String, HubInfoRaw>>,
+    pub qwen3_5: Option<HashMap<String, HubInfoRaw>>,
 }
 
 #[derive(Debug)]
 pub struct ModelRegistry {
     pub qwen3: HashMap<String, HubInfo>,
     pub qwen3_vl: Option<HashMap<String, HubInfo>>,
-    pub llama: Option<HashMap<String, HubInfo>>,
+    pub qwen3_moe: Option<HashMap<String, HubInfo>>,
+    pub qwen3_5: Option<HashMap<String, HubInfo>>,
 }
 
 impl ModelRegistry {
@@ -32,29 +34,20 @@ impl ModelRegistry {
 
     /// 从原始配置转换为最终配置
     fn from_raw(mut raw: ModelRegistryRaw) -> Self {
-        // 处理 qwen3 系列
-        Self::fill_arch_tokenizer_repos(&mut raw.qwen3);
-        let qwen3 = raw.qwen3.into_iter()
-            .map(|(k, v)| (k, HubInfo::from(v)))
-            .collect();
-
-        // 处理 qwen3_vl 系列
-        let qwen3_vl = raw.qwen3_vl.map(|mut vl_models| {
-            Self::fill_arch_tokenizer_repos(&mut vl_models);
-            vl_models.into_iter()
+        // 各架构统一处理：填充 tokenizer_repo 后转换为 HubInfo
+        fn convert(map: &mut HashMap<String, HubInfoRaw>) -> HashMap<String, HubInfo> {
+            ModelRegistry::fill_arch_tokenizer_repos(map);
+            map.drain()
                 .map(|(k, v)| (k, HubInfo::from(v)))
                 .collect()
-        });
+        }
 
-        // 处理 llama 系列
-        let llama = raw.llama.map(|mut llama_models| {
-            Self::fill_arch_tokenizer_repos(&mut llama_models);
-            llama_models.into_iter()
-                .map(|(k, v)| (k, HubInfo::from(v)))
-                .collect()
-        });
+        let qwen3 = convert(&mut raw.qwen3);
+        let qwen3_vl = raw.qwen3_vl.as_mut().map(convert);
+        let qwen3_moe = raw.qwen3_moe.as_mut().map(convert);
+        let qwen3_5 = raw.qwen3_5.as_mut().map(convert);
 
-        Self { qwen3, qwen3_vl, llama }
+        Self { qwen3, qwen3_vl, qwen3_moe, qwen3_5 }
     }
 
     /// 为特定架构的模型填充 tokenizer_repo
@@ -102,11 +95,10 @@ impl ModelRegistry {
     ///   - 格式3: "qwen3" - 获取默认模型
     ///
     /// # 示例
-    /// ```
-    /// let registry = ModelRegistry::load()?;
-    /// let quantized = registry.get("qwen3.8b_q4")?;   // 量化模型
-    /// let official = registry.get("qwen3.8b_full")?;  // 官方模型
-    /// let default = registry.get("qwen3")?;           // 默认模型
+    /// ```ignore
+    /// let registry = ModelRegistry::new()?;
+    /// let quantized = registry.get("qwen3.8b_q4")?;
+    /// let default = registry.get("qwen3")?;
     /// ```
     pub fn get(&self, model_id: &str) -> Result<&HubInfo> {
         let (arch_str, variant) = match model_id.split_once('.') {
@@ -120,10 +112,14 @@ impl ModelRegistry {
                 .qwen3_vl
                 .as_ref()
                 .ok_or_else(|| anyhow!("Qwen3-VL 模型未配置"))?,
-            ModelArch::Llama => self
-                .llama
+            ModelArch::Qwen3MoE => self
+                .qwen3_moe
                 .as_ref()
-                .ok_or_else(|| anyhow!("Llama 模型未配置"))?,
+                .ok_or_else(|| anyhow!("Qwen3-MoE 模型未配置"))?,
+            ModelArch::Qwen3_5 => self
+                .qwen3_5
+                .as_ref()
+                .ok_or_else(|| anyhow!("Qwen3.5 模型未配置"))?,
         };
 
         match variant {

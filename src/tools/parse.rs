@@ -17,6 +17,20 @@
 use anyhow::{bail, Result};
 use regex::Regex;
 use serde::Deserialize;
+use std::sync::LazyLock;
+
+/// XML 包裹格式正则（编译一次，全局复用）
+static RE_TOOL_CALL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<tool_call>\s*(\{.*?\})\s*</tool_call>").expect("valid regex")
+});
+
+/// strip 用的移除正则
+static RE_TOOL_CALL_STRIP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<tool_call>\s*\{.*?\}\s*</tool_call>\n?").expect("valid regex")
+});
+
+/// 连续空行压缩
+static RE_EMPTY_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").expect("valid regex"));
 
 /// ToolCallParser 从模型输出中提取 tool_call 块
 ///
@@ -39,13 +53,10 @@ impl ToolCallParser {
     ///
     /// 返回按出现顺序排列的所有工具调用。
     pub fn parse(output: &str) -> Result<Vec<crate::tools::ParsedToolCall>> {
-        // 优先尝试 <tool_call>...</tool_call> 包裹格式
-        let re = Regex::new(r"<tool_call>\s*(\{.*?\})\s*</tool_call>")
-            .map_err(|e| anyhow::anyhow!("regex error: {}", e))?;
-
+        // 优先尝试 <tool_call>...</tool_call> 包裹格式（正则全局缓存）
         let mut results = Vec::new();
 
-        for cap in re.captures_iter(output) {
+        for cap in RE_TOOL_CALL.captures_iter(output) {
             let json_str = &cap[1];
             if let Some(call) = Self::parse_json_call(json_str)? {
                 results.push(call);
@@ -89,10 +100,8 @@ impl ToolCallParser {
     ///
     /// 用于在显示给用户之前清理模型的原始输出。
     pub fn strip(output: &str) -> String {
-        // 移除 XML 包裹格式
-        let re = Regex::new(r"<tool_call>\s*\{.*?\}\s*</tool_call>\n?")
-            .expect("valid regex");
-        let cleaned = re.replace_all(output, "");
+        // 移除 XML 包裹格式（正则全局缓存）
+        let cleaned = RE_TOOL_CALL_STRIP.replace_all(output, "");
 
         // 若整个输出是裸 JSON 工具调用，清空
         let trimmed = cleaned.trim();
@@ -106,8 +115,7 @@ impl ToolCallParser {
             cleaned
         };
 
-        let re_empty_lines = Regex::new(r"\n{3,}").expect("valid regex");
-        re_empty_lines.replace_all(&cleaned, "\n\n").to_string()
+        RE_EMPTY_LINES.replace_all(&cleaned, "\n\n").to_string()
     }
 }
 

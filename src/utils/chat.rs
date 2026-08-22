@@ -1,21 +1,25 @@
 use anyhow::{Error, Result, bail};
 use derive_new::new;
 use hf_hub::api::tokio::{Api, ApiBuilder};
-use minijinja::{Environment, Template};
+use minijinja::Environment;
 use minijinja_contrib::pycompat;
 use serde::Serialize;
 use serde_json::Value;
 use std::fs::File;
 use std::io::BufReader;
 use std::ops::{Deref, DerefMut};
-use std::sync::LazyLock;
 
-/// Environment存在生命周期标注，放置全局避免在ChatContext中处理生命周期问题
-static TEMPLATE_ENV: LazyLock<Environment> = LazyLock::new(|| {
+/// 构造对齐 HF 模板约定的 Jinja 环境：
+/// - pycompat 回调支持模板中的 Python 风格方法调用（切片等）
+/// - raise_exception 函数（HF 官方模板常用）
+fn template_env() -> Environment<'static> {
     let mut env = Environment::new();
     env.set_unknown_method_callback(pycompat::unknown_method_callback);
+    env.add_function("raise_exception", |msg: String| -> Result<String, minijinja::Error> {
+        Err(minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, msg))
+    });
     env
-});
+}
 
 pub async fn load_template(tokenizer_repo: &str) -> Result<Value> {
     let pth = ApiBuilder::from_env()
@@ -43,14 +47,23 @@ pub struct Message {
     pub content: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone)]
 pub struct ChatContext {
     pub messages: Vec<Message>,
     add_generation_prompt: bool,
-    // qwen3特有
+    // qwen3 特有，渲染时作为模板上下文变量传入
     pub enable_thinking: bool,
-    #[serde(skip_serializing)]
-    template: Template<'static, 'static>,
+    env: Environment<'static>,
+}
+
+impl std::fmt::Debug for ChatContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatContext")
+            .field("messages", &self.messages.len())
+            .field("add_generation_prompt", &self.add_generation_prompt)
+            .field("enable_thinking", &self.enable_thinking)
+            .finish()
+    }
 }
 
 impl Deref for ChatContext {
@@ -80,12 +93,15 @@ impl ChatContext {
 
     /// 从模板字符串创建ChatContext
     pub fn from_template(template_str: &str) -> Result<Self> {
+        let mut env = template_env();
+        // 传 String 使 Cow::Owned，环境持有模板所有权（'static）
+        env.add_template_owned("chat", template_str.to_string())
+            .map_err(Error::msg)?;
         Ok(Self {
             messages: vec![],
             add_generation_prompt: true,
             enable_thinking: false,
-            template: TEMPLATE_ENV
-                .template_from_str(Box::leak(template_str.to_string().into_boxed_str()))?,
+            env,
         })
     }
 
@@ -142,12 +158,23 @@ impl ChatContext {
     }
 
     /// 渲染为模板字符串
+    ///
+    /// 上下文变量对齐 HF `apply_chat_template` 约定：
+    /// messages / add_generation_prompt / enable_thinking / bos_token / eos_token
     pub fn render(&self) -> Result<String> {
         if self.messages.is_empty() {
             bail!("no messages");
         }
-        let ctx = serde_json::to_value(self)?;
-        self.template.render(&ctx).map_err(Error::msg)
+        let template = self.env.get_template("chat").map_err(Error::msg)?;
+        template
+            .render(minijinja::context! {
+                messages => &self.messages,
+                add_generation_prompt => self.add_generation_prompt,
+                enable_thinking => self.enable_thinking,
+                bos_token => "",
+                eos_token => "",
+            })
+            .map_err(Error::msg)
     }
 }
 

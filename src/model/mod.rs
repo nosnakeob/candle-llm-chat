@@ -1,11 +1,10 @@
 use anyhow::Result;
 use candle::quantized::gguf_file::Content;
 use candle::{Device, Tensor};
-use candle_transformers::models::{quantized_llama, quantized_qwen3, qwen3};
-use std::io::{Read, Seek};
-
-pub mod config;
+use candle_transformers::models::{quantized_qwen3, quantized_qwen3_moe, qwen3};
+use std::io::{Read, Seek};pub mod config;
 pub mod hub;
+pub mod qwen3_5;
 pub mod qwen3_vl;
 pub mod registry;
 
@@ -58,7 +57,28 @@ pub trait ModelInference {
 }
 
 impl_model_traits!(
-    // quantized_llama::ModelWeights,
     quantized_qwen3::ModelWeights,
     qwen3::ModelForCausalLM
 );
+
+/// GGUFQWenMoE 的封装，提供 clr_kv_cache
+pub struct Qwen3MoEModel {
+    pub(crate) inner: quantized_qwen3_moe::GGUFQWenMoE,
+}
+
+impl ModelInference for Qwen3MoEModel {
+    fn forward(
+        &mut self,
+        x: &Tensor,
+        index_pos: usize,
+        _vision: Option<&VisionInput>,
+    ) -> anyhow::Result<Tensor> {
+        self.inner.forward(x, index_pos).map_err(anyhow::Error::msg)
+    }
+
+    fn clr_kv_cache(&mut self) {
+        // 上游 GGUFQWenMoE 的 kv_cache 字段私有且未暴露 reset（截至 0.11/main），
+        // 需向 candle 提 PR 暴露 clear_kv_cache 后才能实现。
+        // 临时方案：多轮对话间重建 pipeline。
+    }
+}
