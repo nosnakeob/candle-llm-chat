@@ -25,6 +25,9 @@ pub struct ChatPipeline {
     ctx: ChatContext,
     infer_conf: InferenceConfig,
     eos_token_id: u32,
+    /// 额外需要停止的 token id（如 <|im_end|>，Qwen3.5 config 的 eos 是 <|endoftext|>
+    /// 但 chat 模板实际以 <|im_end|> 结尾）
+    stop_tokens: Vec<u32>,
 }
 
 impl ChatPipeline {
@@ -39,23 +42,30 @@ impl ChatPipeline {
 
         let ctx = ChatContext::from_repo(&hub_info.tokenizer_repo).await?;
 
-        let (model, tokenizer, eos_token_id) = if arch == "qwen3_vl" {
+        let (model, tokenizer, eos_token_id, stop_tokens) = if arch == "qwen3_vl" {
             let (vl, tok, eos) = Qwen3VL::load(&hub_info, device).await?;
-            (Box::new(vl) as Box<dyn ModelInference>, tok, eos)
-        } else {
-            let pth = ApiBuilder::from_env()
+            (Box::new(vl) as Box<dyn ModelInference>, tok, eos, vec![])
+        } else {            let pth = ApiBuilder::from_env()
                 .build()?
                 .model(hub_info.tokenizer_repo.clone())
                 .get("config.json")
                 .await?;
             let v: Value = serde_json::from_str(&fs::read_to_string(pth)?)?;
+            // eos_token_id 可能在顶层或嵌套在 text_config（Qwen3.5+ 多模态配置格式）
             let eos = v
                 .get("eos_token_id")
+                .or_else(|| v.get("text_config").and_then(|tc| tc.get("eos_token_id")))
                 .and_then(|x| x.as_u64())
                 .ok_or_else(|| anyhow!("eos_token_id not found"))? as u32;
 
+            // 从 tokenizer 解析 <|im_end|> 等额外停止 token
             let (m, tok) = ModelLoader::load(&hub_info, device).await?;
-            (m, tok, eos)
+            let stop_tokens: Vec<u32> = ["<|im_end|>", "<|endoftext|>"]
+                .iter()
+                .filter_map(|s| tok.token_to_id(s))
+                .filter(|&id| id != eos)
+                .collect();
+            (m, tok, eos, stop_tokens)
         };
 
         Ok(Self {
@@ -65,6 +75,7 @@ impl ChatPipeline {
             ctx,
             infer_conf: config,
             eos_token_id,
+            stop_tokens,
         })
     }
 
@@ -89,10 +100,14 @@ impl ChatPipeline {
             let start = std::time::Instant::now();
             let ans_start_idx = ctx_tokens.len();
 
+            let mut decode_start: Option<std::time::Instant> = None;
+            let mut decoded = 0usize;
             for index in 0..self.infer_conf.sample_len {
+                let t0 = std::time::Instant::now();
                 let next_token = if index == 0 {
                     self.gen_next_token(&ctx_tokens, 0, None, None)?
                 } else {
+                    if decode_start.is_none() { decode_start = Some(std::time::Instant::now()); }
                     self.gen_next_token(
                         &ctx_tokens,
                         ans_start_idx + index - 1,
@@ -100,6 +115,8 @@ impl ChatPipeline {
                         None,
                     )?
                 };
+                let dt = t0.elapsed();
+                tracing::info!("[q35-perf] idx={index} gen={dt:.1?}");
                 ctx_tokens.push(next_token);
 
                 if let Some(t) = self.tos.next_token(next_token)? {
@@ -107,9 +124,13 @@ impl ChatPipeline {
                     yield t;
                 }
 
-                if next_token == self.eos_token_id {
+                if self.is_stop_token(next_token) {
                     break;
                 }
+                decoded += 1;
+            }
+            if let Some(ds) = decode_start {
+                info!("[q35-perf] decode total: {} tok in {:.1?} = {:.2} tok/s", decoded, ds.elapsed(), decoded as f64 / ds.elapsed().as_secs_f64());
             }
 
             if let Some(t) = self.tos.decode_rest()? {
@@ -189,7 +210,7 @@ impl ChatPipeline {
                     yield t;
                 }
 
-                if next_token == self.eos_token_id {
+                if self.is_stop_token(next_token) {
                     break;
                 }
             }
@@ -307,7 +328,7 @@ impl ChatPipeline {
                 answer.push_str(&t);
             }
 
-            if next_token == self.eos_token_id {
+            if self.is_stop_token(next_token) {
                 break;
             }
         }
@@ -328,6 +349,11 @@ impl ChatPipeline {
         }
 
         Ok(answer)
+    }
+
+    /// 判断是否命中停止 token（eos 或额外 stop tokens）
+    fn is_stop_token(&self, t: u32) -> bool {
+        t == self.eos_token_id || self.stop_tokens.contains(&t)
     }
 
     fn str2tokens(&mut self, string: &str) -> Result<Vec<u32>> {

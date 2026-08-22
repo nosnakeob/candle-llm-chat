@@ -6,7 +6,9 @@
 # - tokenizer_repo 未配置时自动使用对应的非 GGUF 仓库
 # - 系列.大小_变体
 
-# === Qwen3 系列 ===
+# ── Qwen3 系列 ──────────────────────────────────────────────────────────────
+# 架构: qwen3 / quantized_qwen3  (candle qwen3.rs)
+# 支持: 纯文本、工具调用
 [qwen3]
 
 [qwen3.4b_base]
@@ -42,18 +44,45 @@ model_repo = "Qwen/Qwen3-32B"
 model_repo = "Qwen/Qwen3-32B-GGUF"
 model_file = "Qwen3-32B-Q4_K_M.gguf"
 
-# === Llama 系列 ===
-# [llama]
-
-# [llama.8b_deepseek_r1_q4]
-# model_repo = "lmstudio-community/DeepSeek-R1-Distill-Llama-8B-GGUF"
-# model_file = "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"
-# tokenizer_repo = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-# default = true
-
-# === Qwen3-VL 系列 ===
+# ── Qwen3-VL 系列 ───────────────────────────────────────────────────────────
+# 架构: Qwen3VL  (src/model/qwen3_vl.rs)
+# 支持: 图文多模态对话
 [qwen3_vl]
 
 [qwen3_vl.2b_base]
 model_repo = "Qwen/Qwen3-VL-2B-Instruct"
 default = true
+
+# ── Qwen3 MoE 系列 ─────────────────────────────────────────────────────────
+# 架构: quantized_qwen3_moe  (candle quantized_qwen3_moe.rs)
+# 支持: GGUF 量化版 MoE
+[qwen3_moe]
+
+[qwen3_moe.32b_q4]
+model_repo = "bartowski/Qwen_Qwen3-32B-A3B-Instruct-2507-GGUF"
+model_file = "Qwen_Qwen3-32B-A3B-Instruct-2507-Q4_K_M.gguf"
+tokenizer_repo = "Qwen/Qwen3-32B-A3B-Instruct-2507"
+
+# ── Qwen3.5 系列 ──────────────────────────────────────────────────────────
+# 架构: qwen3_5 / quantized_qwen3_5  (Gated DeltaNet + Gated Attention)
+# 支持: GGUF 量化版，2026年2月发布，混合线性注意力架构
+[qwen3_5]
+
+[qwen3_5.4b_q4]
+model_repo = "unsloth/Qwen3.5-4B-GGUF"
+model_file = "Qwen3.5-4B-Q4_K_M.gguf"
+default = true
+
+[qwen3_5.9b_q4]
+model_repo = "unsloth/Qwen3.5-9B-GGUF"
+model_file = "Qwen3.5-9B-Q4_K_M.gguf"
+
+[qwen3_5.0_8b_q4]
+model_repo = "unsloth/Qwen3.5-0.8B-GGUF"
+model_file = "Qwen3.5-0.8B-Q4_K_M.gguf"
+tokenizer_repo = "Qwen/Qwen3.5-0.8B"
+
+[qwen3_5.27b_q4]
+model_repo = "unsloth/Qwen3.5-27B-GGUF"
+model_file = "Qwen3.5-27B-Q4_K_M.gguf"
+tokenizer_repo = "Qwen/Qwen3.5-27B"
