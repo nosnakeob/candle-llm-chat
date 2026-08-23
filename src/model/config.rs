@@ -46,8 +46,10 @@ impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
             sample_len: 1000,
-            temperature: 0.8,
-            top_p: None,
+            // temp 0.7 + top_p 0.8：Qwen3.5 词表 248k，无 top_p 截断时长尾噪声
+            // 会采进重复吸引子（实测 0.8B 无截断时输出死循环，贪心/top_p 均正常）
+            temperature: 0.7,
+            top_p: Some(0.8),
             seed: 299792458,
             repeat_penalty: 1.1,
             repeat_last_n: 64,
