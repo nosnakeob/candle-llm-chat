@@ -51,7 +51,10 @@ pub enum ModelArch {
     Qwen3,
     #[strum(serialize = "qwen3_vl")]
     Qwen3VL,
-    Llama,
+    #[strum(serialize = "qwen3_moe")]
+    Qwen3MoE,
+    #[strum(serialize = "qwen3_5")]
+    Qwen3_5,
 }
 
 #[cfg(test)]

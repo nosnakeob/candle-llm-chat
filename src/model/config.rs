@@ -1,4 +1,4 @@
-use crate::model::ModelInference;
+use crate::model::{ModelInference, Qwen3MoEModel};
 use crate::model::hub::{HubInfo, ModelArch, ModelType};
 use crate::model::registry::ModelRegistry;
 use crate::utils::load::ApiRepoExt;
@@ -9,7 +9,7 @@ use candle::quantized::tokenizer::TokenizerFromGguf;
 use candle::{DType, Device};
 use candle_nn::VarBuilder;
 use candle_transformers::models::{
-    quantized_llama, quantized_qwen3,
+    quantized_qwen3,
     qwen3::{Config as Qwen3Config, ModelForCausalLM as Qwen3Model},
 };
 use hf_hub::api::tokio::{Api, ApiBuilder};
@@ -84,16 +84,31 @@ impl ModelLoader {
 
         let tokenizer = Tokenizer::from_gguf(&ct)?;
 
-        let repo = hub_info.model_repo.to_lowercase();
-        let model = if repo.contains("qwen3") {
-            let model = quantized_qwen3::ModelWeights::from_gguf(ct, &mut file, device)?;
-            Box::new(model) as Box<dyn ModelInference>
-        } else if repo.contains("llama") {
-            // let model = quantized_llama::ModelWeights::from_gguf(ct, &mut file, device)?;
-            // Box::new(model) as Box<dyn ModelInference>
-            bail!("Llama gguf support not yet implemented");
-        } else {
-            bail!("Unsupported model type");
+        // 从 GGUF metadata 读取架构名，比 repo 名匹配更准确
+        let arch = ct
+            .metadata
+            .get("general.architecture")
+            .and_then(|v| v.to_string().ok())
+            .cloned()
+            .unwrap_or_default();
+
+        let model: Box<dyn ModelInference> = match arch.as_str() {
+            "qwen3" | "qwen2" => {
+                let model = quantized_qwen3::ModelWeights::from_gguf(ct, &mut file, device)?;
+                Box::new(model)
+            }
+            "qwen3_moe" | "qwen2_moe" => {
+                let model =
+                    candle_transformers::models::quantized_qwen3_moe::GGUFQWenMoE::from_gguf(ct, &mut file, device, DType::F32)?;
+                Box::new(Qwen3MoEModel { inner: model })
+            }
+            "qwen3.5" | "qwen35" => {
+                let model = crate::model::qwen3_5::QuantizedModelWeights::from_gguf(
+                    ct, &mut file, device,
+                )?;
+                Box::new(model)
+            }
+            _ => bail!("不支持的 GGUF 架构: {arch}"),
         };
 
         Ok((model, tokenizer))
@@ -133,8 +148,14 @@ impl ModelLoader {
             ModelArch::Qwen3VL => {
                 bail!("Qwen3-VL safetensors 使用专用管线加载，不通过 ModelLoader")
             }
-            ModelArch::Llama => {
-                bail!("Llama safetensors support not yet implemented");
+            ModelArch::Qwen3MoE => {
+                bail!("Qwen3-MoE safetensors 加载暂未实现")
+            }
+            ModelArch::Qwen3_5 => {
+                let config: crate::model::qwen3_5::Config =
+                    serde_json::from_slice(&config_content)?;
+                let model = crate::model::qwen3_5::ModelForCausalLM::new(&config, vb)?;
+                Box::new(model)
             }
         };
 

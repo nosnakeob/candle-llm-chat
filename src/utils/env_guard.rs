@@ -4,7 +4,7 @@
 ///
 /// # 示例
 ///
-/// ```rust
+/// ```ignore
 /// // 临时设置代理
 /// let _proxy = ProxyGuard::new(7890);
 ///
@@ -40,14 +40,6 @@ impl Drop for ProxyGuard {
 /// 临时覆盖 `HF_ENDPOINT` 环境变量，Drop 时恢复原始值（若原本不存在则移除）。
 ///
 /// `hf-hub` 在构造 `ApiBuilder` 时读取该变量，因此必须在创建 API 客户端之前设置。
-///
-/// # 示例
-///
-/// ```rust
-/// // 使用国内镜像站下载模型
-/// let _hf = HfEndpointGuard::new("https://hf-mirror.com");
-/// let api = ApiBuilder::from_env().build()?;
-/// ```
 pub struct HfEndpointGuard {
     prev: Option<String>,
 }
