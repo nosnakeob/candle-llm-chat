@@ -37,6 +37,33 @@ fn sample<F: FnMut()>(name: &str, n: usize, rounds: usize, dev: &Device, mut f: 
     Ok(())
 }
 
+/// 单算子提交成本（决定 candle 在小张量推理上的上限）
+///
+/// Nsight 实测结论：decode 每 token 有 306 个 kernel，但 GPU 只忙 1.2ms，
+/// 墙钟 15.8ms —— 93% 时间 GPU 在等 CPU 提交。这里把那个「每次提交多少钱」
+/// 显式量出来，方便判断后续改动是否动到了真正的瓶颈。
+#[test]
+fn per_operator_launch_cost() -> anyhow::Result<()> {
+    let dev = Device::cuda_if_available(0)?;
+    let shape = (1usize, 16usize, 128usize, 128usize);
+    let a = Tensor::randn(0f32, 1f32, shape, &dev)?;
+    let b = Tensor::randn(0f32, 1f32, shape, &dev)?;
+    // 首轮含 CUDA kernel JIT 编译，必须丢掉
+    for round in 0..3 {
+        let t = Instant::now();
+        for _ in 0..100 {
+            let s = (&a * &b)?;
+            let s = s.matmul(&a)?;
+            let s = (&s + &b)?;
+            let _ = s.exp()?;
+        }
+        dev.synchronize()?;
+        let per = t.elapsed().as_secs_f64() * 1e6 / 400.0;
+        println!("round {round}: 每算子 {per:7.2} µs  [{}]", sm_clock());
+    }
+    Ok(())
+}
+
 #[test]
 fn measurement_noise_level() -> anyhow::Result<()> {
     let dev = Device::cuda_if_available(0)?;
