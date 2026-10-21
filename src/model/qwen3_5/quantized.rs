@@ -335,9 +335,10 @@ impl GatedDeltaNetWeights {
     }
 
     fn l2_norm(xs: &Tensor) -> Result<Tensor> {
+        // 用 rsqrt 等价式减少一次中间分配（broadcast_div 后接 sqrt 会多一份 (.., K, 1) 张量）
         let eps = 1e-6;
-        let norm = (xs.sqr()?.sum_keepdim(D::Minus1)? + eps)?.sqrt()?;
-        xs.broadcast_div(&norm)
+        let inv = (xs.sqr()?.sum_keepdim(D::Minus1)? + eps)?.sqrt()?.recip()?;
+        xs.broadcast_mul(&inv)
     }
 
     fn rms_norm_gated(&self, x: &Tensor, g: &Tensor) -> Result<Tensor> {
@@ -378,6 +379,7 @@ impl GatedDeltaNetWeights {
         // CPU storage 路径上 prefill 反而更慢（t=18 每层 13ms vs 逐 token 0.46ms），
         // 因此默认仍走逐 token 递推；需要时用 Q35_CHUNKED_PREFILL=1 显式启用。
         if std::env::var_os("Q35_CHUNKED_PREFILL").is_some() && seq_len > 1 {
+            let in_dtype = query.dtype();
             let mut state = match initial_state {
                 Some(state) => state.to_dtype(DType::F32)?.contiguous()?,
                 None => Tensor::zeros(
@@ -396,7 +398,7 @@ impl GatedDeltaNetWeights {
             let out = crate::model::qwen3_5::chunked_scan::gated_delta_rule_chunked(
                 &q_c, &k_c, &v_c, &log_g, &beta_c, &mut state,
             )?;
-            return Ok((out.transpose(1, 2)?, state));
+            return Ok((out.transpose(1, 2)?.to_dtype(in_dtype)?, state));
         }
 
         let scale = 1.0 / (query.dim(3)? as f64).sqrt();
@@ -448,14 +450,17 @@ impl GatedDeltaNetWeights {
             let g_t = g_exp.narrow(2, i, 1)?;
             let beta_t = beta_f32.narrow(2, i, 1)?;
 
+            // 先衰减（广播出整块 (B,H,K,V) 副本，CUDA 上每 token 一次整体改写）
             last_recurrent_state = last_recurrent_state.broadcast_mul(&g_t)?;
 
             let kv_mem = k_t.matmul(&last_recurrent_state)?;
             let delta = (&v_t - &kv_mem)?.broadcast_mul(&beta_t)?;
 
+            // δk = k^T · δ 是外积，用 matmul 走 GEMM 而不是广播
             let delta_k = k_t.transpose(2, 3)?.matmul(&delta)?;
             last_recurrent_state = (&last_recurrent_state + &delta_k)?;
 
+            // 输出 = q · S'
             let out_t = q_t.matmul(&last_recurrent_state)?;
             core_attn_out_vec.push(out_t);
         }
