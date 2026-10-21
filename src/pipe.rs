@@ -96,6 +96,9 @@ impl ChatPipeline {
         try_stream!({
             let prompt = self.ctx.render()?;
             let mut ctx_tokens = self.str2tokens(&prompt)?;
+            if std::env::var_os("Q35_PERF").is_some() {
+                tracing::info!("[q35-prefill] prompt_tokens={} msgs={}", ctx_tokens.len(), self.ctx.messages.len());
+            }
 
             let start = std::time::Instant::now();
             let ans_start_idx = ctx_tokens.len();
@@ -116,8 +119,10 @@ impl ChatPipeline {
                     )?
                 };
                 let dt = t0.elapsed();
-                if std::env::var_os("Q35_PERF").is_some() {
-                    tracing::info!("[q35-perf] idx={index} gen={dt:.1?}");
+                // 注意：这里只记录 CPU 侧提交耗时，不含 GPU 排队；打开后每 token 会多一次同步，
+                // 测到的脚本会整体变慢（这个开关本来就是诊断用的取样行为）。
+                if std::env::var_os("Q35_PERF").is_some() && index < 200 {
+                    tracing::info!("[q35-perf] idx={index} gen={dt:.1?} prompt={ans_start_idx}");
                 }
                 ctx_tokens.push(next_token);
 
@@ -267,6 +272,12 @@ impl ChatPipeline {
     }
 
     // ─── Agent 接口 ──────────────────────────────────────────────────────
+
+    /// 清空对话历史（保留 system prompt），同时丢弃 KV cache / GDN 状态
+    pub fn clear_history(&mut self) {
+        self.ctx.clear_history();
+        self.model.clr_kv_cache();
+    }
 
     pub fn inject_system_prompt(&mut self, system_prompt: &str) -> Result<()> {
         self.ctx.push_system(system_prompt);

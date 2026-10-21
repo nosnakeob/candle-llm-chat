@@ -13,6 +13,7 @@ use candle_transformers::models::with_tracing::QMatMul;
 use candle_transformers::quantized_nn::RmsNorm;
 use candle_transformers::utils::repeat_kv;
 use std::io::{Read, Seek};
+use std::time::Instant;
 use std::sync::Arc;
 
 pub struct Gguf<R: Read + Seek> {
@@ -378,7 +379,7 @@ impl GatedDeltaNetWeights {
         // 注：上游 PR #3461 的分块 WY 扫描（chunked_scan）已引入，但实测在本机的
         // CPU storage 路径上 prefill 反而更慢（t=18 每层 13ms vs 逐 token 0.46ms），
         // 因此默认仍走逐 token 递推；需要时用 Q35_CHUNKED_PREFILL=1 显式启用。
-        if std::env::var_os("Q35_CHUNKED_PREFILL").is_some() && seq_len > 1 {
+        if chunked_prefill_enabled() && seq_len > 1 {
             let in_dtype = query.dtype();
             let mut state = match initial_state {
                 Some(state) => state.to_dtype(DType::F32)?.contiguous()?,
@@ -420,6 +421,24 @@ impl GatedDeltaNetWeights {
         let value_f32 = value.to_dtype(DType::F32)?.contiguous()?;
         let g_exp = g.to_dtype(DType::F32)?.exp()?.unsqueeze(3)?.contiguous()?;
         let beta_f32 = beta.to_dtype(DType::F32)?.unsqueeze(3)?.contiguous()?;
+
+        // 广播乘在 CUDA 上是慢路径：实测 (1,16,128,128) broadcast_mul (1,16,1,1)
+        // 要 ~420µs，而同形状全量 mul 只要 ~20µs。这里把标量门控预先展开成
+        // (B,H,1,V)，后续只用普通 mul —— 每层每 token 少 5 次广播。
+        // 衰减 g 作用于整块状态 (B,H,K,V) → 展开成 (B,H,K,V)
+        let expand_decay = |t: &Tensor| -> Result<Tensor> {
+            let (b, h, s, _) = t.dims4()?;
+            // (B,H,S,1) -> (B,H,S,1,1) -> 广播 (B,H,S,K,V) -> 合并成 (B,H*S*K, V)
+            let t5 = t.reshape((b, h, s, 1, 1))?;
+            t5.broadcast_as((b, h, s, k_head_dim, v_head_dim))?
+                .reshape((b, h, s * k_head_dim, v_head_dim))?
+                .contiguous()
+        };
+        // beta 作用于 delta (B,H,1,V) → 展开成 (B,H,1,V)
+        let expand_beta = |t: &Tensor| -> Result<Tensor> {
+            let (b, h, s, _) = t.dims4()?;
+            t.broadcast_as((b, h, s, v_head_dim))?.contiguous()
+        };
         // kernel 接口：g/beta 用 (B,H)，从 (B,H,1,1) 收缩
         let g_bh = g_exp.squeeze(3)?.squeeze(2)?;
         let beta_bh = beta_f32.squeeze(3)?.squeeze(2)?;
@@ -450,11 +469,14 @@ impl GatedDeltaNetWeights {
             let g_t = g_exp.narrow(2, i, 1)?;
             let beta_t = beta_f32.narrow(2, i, 1)?;
 
-            // 先衰减（广播出整块 (B,H,K,V) 副本，CUDA 上每 token 一次整体改写）
-            last_recurrent_state = last_recurrent_state.broadcast_mul(&g_t)?;
+            // 衰减：g 已预展开成 (B,H,1,V)，走快路径的普通 mul
+            let g_t = expand_decay(&g_t)?;
+            last_recurrent_state = (&last_recurrent_state * &g_t)?;
 
             let kv_mem = k_t.matmul(&last_recurrent_state)?;
-            let delta = (&v_t - &kv_mem)?.broadcast_mul(&beta_t)?;
+            let beta_t = expand_beta(&beta_t)?;
+            let delta = (&v_t - &kv_mem)?;
+            let delta = (&delta * &beta_t)?;
 
             // δk = k^T · δ 是外积，用 matmul 走 GEMM 而不是广播
             let delta_k = k_t.transpose(2, 3)?.matmul(&delta)?;
@@ -484,7 +506,7 @@ impl GatedDeltaNetWeights {
 
         let use_precomputed_states = self.conv_state.is_some() && seq_len == 1;
 
-        let t_conv = std::time::Instant::now();
+        let t_conv = Instant::now();
         let mixed_qkv = if use_precomputed_states {
             let conv_state = self.conv_state.as_mut().unwrap();
             let conv_state_data = Tensor::cat(&[conv_state.as_ref(), &mixed_qkv], 2)?;
@@ -504,7 +526,6 @@ impl GatedDeltaNetWeights {
             candle_nn::ops::silu(&out)?
         };
 
-        self.conv1d_weight.device().synchronize().ok();
         let dt_conv = t_conv.elapsed();
         let mixed_qkv = mixed_qkv.transpose(1, 2)?;
 
@@ -534,10 +555,9 @@ impl GatedDeltaNetWeights {
             None
         };
 
-        let t_dr = std::time::Instant::now();
+        let t_dr = Instant::now();
         let (core_attn_out, new_state) =
             self.torch_recurrent_gated_delta_rule(&q, &k, &v, &g, &beta, initial_state)?;
-        q.device().synchronize().ok();
         let dt_dr = t_dr.elapsed();
         self.recurrent_state = Some(new_state);
 
@@ -551,7 +571,8 @@ impl GatedDeltaNetWeights {
             core_attn_out.reshape((batch_size, seq_len, self.num_v_heads * self.head_v_dim))?;
 
         let out = self.out_proj.forward(&core_attn_out);
-        if std::env::var("Q35_PERF").is_ok() && seq_len <= 2 {
+        // 每 token 查一次 env 在热路径上不便宜，用进程级缓存
+        if seq_len <= 2 && perf_enabled() {
             tracing::info!("[q35-gdn] conv={dt_conv:.1?} delta_rule={dt_dr:.1?}");
         }
         out
@@ -561,6 +582,16 @@ impl GatedDeltaNetWeights {
         self.conv_state = None;
         self.recurrent_state = None;
     }
+}
+
+fn chunked_prefill_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("Q35_CHUNKED_PREFILL").is_some())
+}
+
+fn perf_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("Q35_PERF").is_some())
 }
 
 // ─── 融合算子：Gated DeltaNet 单 token 递推 ────────────────────────────────────
@@ -1127,7 +1158,8 @@ impl ModelWeights {
         } else {
             Some(self.causal_mask(b, l, offset)?)
         };
-        // 分层计时（perf 调查用，开销可忽略）
+        // 计时探针：不做任何强制同步，只记录 CPU 侧耗时；
+        // 需要精确 GPU 时间时由调用方（pipe）在整轮结束处同步一次。
         let mut gdn_mix = std::time::Duration::ZERO;
         let mut full_mix = std::time::Duration::ZERO;
         let mut mlp_t = std::time::Duration::ZERO;
@@ -1153,7 +1185,7 @@ impl ModelWeights {
             }
             mlp_t += tp;
         }
-        if std::env::var("Q35_PERF").is_ok() {
+        if perf_enabled() {
             tracing::info!(
                 "[q35-layers] l={l} offset={offset} gdn({n_gdn})={gdn_mix:.1?} full({n_full})={full_mix:.1?} mlp={mlp_t:.1?}"
             );
