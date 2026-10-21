@@ -10,7 +10,6 @@ use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::utils::apply_repeat_penalty;
 use futures_core::stream::Stream;
-use hf_hub::api::tokio::ApiBuilder;
 use serde_json::Value;
 use std::fs;
 use std::pin::Pin;
@@ -45,11 +44,12 @@ impl ChatPipeline {
         let (model, tokenizer, eos_token_id, stop_tokens) = if arch == "qwen3_vl" {
             let (vl, tok, eos) = Qwen3VL::load(&hub_info, device).await?;
             (Box::new(vl) as Box<dyn ModelInference>, tok, eos, vec![])
-        } else {            let pth = ApiBuilder::from_env()
-                .build()?
-                .model(hub_info.tokenizer_repo.clone())
-                .get("config.json")
-                .await?;
+        } else {
+            let pth = crate::utils::hf::fetch(
+                &crate::utils::hf::model_repo(&hub_info.tokenizer_repo)?,
+                "config.json",
+            )
+            .await?;
             let v: Value = serde_json::from_str(&fs::read_to_string(pth)?)?;
             // eos_token_id 可能在顶层或嵌套在 text_config（Qwen3.5+ 多模态配置格式）
             let eos = v
@@ -116,7 +116,9 @@ impl ChatPipeline {
                     )?
                 };
                 let dt = t0.elapsed();
-                tracing::info!("[q35-perf] idx={index} gen={dt:.1?}");
+                if std::env::var_os("Q35_PERF").is_some() {
+                    tracing::info!("[q35-perf] idx={index} gen={dt:.1?}");
+                }
                 ctx_tokens.push(next_token);
 
                 if let Some(t) = self.tos.next_token(next_token)? {
@@ -415,7 +417,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_prompt() -> Result<()> {
-        let mut pipe = ChatPipeline::with_default_config("qwen3.4b_q4").await?;
+        let mut pipe = ChatPipeline::with_default_config("qwen3_5.0_8b_q4").await?;
 
         let prompts = vec![
             "我是snake，你给我记住了",

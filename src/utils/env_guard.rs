@@ -93,14 +93,12 @@ mod tests {
     async fn test_hf_endpoint_mirror_reachable() {
         let _guard = HfEndpointGuard::new("https://hf-mirror.com");
 
-        let api = hf_hub::api::tokio::ApiBuilder::from_env()
-            .build()
-            .expect("构建 ApiBuilder 失败");
+        // 注意：hf 客户端是进程级单例，若此前已构建过则本 guard 不生效
+        let repo = hf_hub::HFClient::new()
+            .expect("构建 HFClient 失败")
+            .model("Qwen", "Qwen3-4B-Instruct-2507");
 
-        let result = api
-            .model("Qwen/Qwen3-4B-Instruct-2507".to_string())
-            .get("config.json")
-            .await;
+        let result = repo.download_file().filename("config.json").send().await;
 
         dbg!(result.is_ok());
     }

@@ -1,8 +1,8 @@
 use crate::model::{ModelInference, Qwen3MoEModel};
 use crate::model::hub::{HubInfo, ModelArch, ModelType};
 use crate::model::registry::ModelRegistry;
-use crate::utils::load::ApiRepoExt;
-use crate::utils::load::{download_gguf, load_tokenizer};
+use crate::utils::hf::{fetch, model_repo};
+use crate::utils::load::{ApiRepoExt, download_gguf, download_safetensors, load_tokenizer};
 use anyhow::{Result, anyhow};
 use candle::quantized::gguf_file::Content;
 use candle::quantized::tokenizer::TokenizerFromGguf;
@@ -12,7 +12,6 @@ use candle_transformers::models::{
     quantized_qwen3,
     qwen3::{Config as Qwen3Config, ModelForCausalLM as Qwen3Model},
 };
-use hf_hub::api::tokio::{Api, ApiBuilder};
 use serde_json::Value;
 use std::fs::File;
 use tokenizers::Tokenizer;
@@ -84,6 +83,7 @@ impl ModelLoader {
         let mut file = File::open(model_pth)?;
         let ct = Content::read(&mut file)?;
 
+        // candle 自带的 GGUF → tokenizers 转换
         let tokenizer = Tokenizer::from_gguf(&ct)?;
 
         // 从 GGUF metadata 读取架构名，比 repo 名匹配更准确
@@ -121,24 +121,17 @@ impl ModelLoader {
         hub_info: &HubInfo,
         device: &Device,
     ) -> Result<(Box<dyn ModelInference>, Tokenizer)> {
-        let api = ApiBuilder::from_env().build()?;
-        let repo = api.model(hub_info.model_repo.clone());
+        let repo = model_repo(&hub_info.model_repo)?;
 
-        // 加载模型权重文件
-        let model_files = match repo.get(&hub_info.model_file).await {
-            Ok(single_file) => vec![single_file],
-            Err(_) => {
-                // 单文件不存在，尝试获取分片文件
-                repo.get_safetensors().await?
-            }
-        };
+        // 加载模型权重文件（单文件优先，缺失时回退分片）
+        let model_files = download_safetensors(&repo, &hub_info.model_file).await?;
 
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&model_files, DType::BF16, device)? };
 
         let arch = ModelArch::Qwen3;
 
         // 加载配置文件
-        let config_path = repo.get("config.json").await?;
+        let config_path = fetch(&repo, "config.json").await?;
         let config_content = std::fs::read(&config_path)?;
 
         let model: Box<dyn ModelInference> = match arch {
@@ -161,7 +154,7 @@ impl ModelLoader {
             }
         };
 
-        let tokenizer = load_tokenizer(&hub_info.tokenizer_repo)?;
+        let tokenizer = load_tokenizer(&hub_info.tokenizer_repo).await?;
 
         Ok((model, tokenizer))
     }

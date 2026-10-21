@@ -1,6 +1,5 @@
 use anyhow::{Error, Result, bail};
 use derive_new::new;
-use hf_hub::api::tokio::{Api, ApiBuilder};
 use minijinja::Environment;
 use minijinja_contrib::pycompat;
 use serde::Serialize;
@@ -22,11 +21,11 @@ fn template_env() -> Environment<'static> {
 }
 
 pub async fn load_template(tokenizer_repo: &str) -> Result<Value> {
-    let pth = ApiBuilder::from_env()
-        .build()?
-        .model(tokenizer_repo.to_string())
-        .get("tokenizer_config.json")
-        .await?;
+    let pth = crate::utils::hf::fetch(
+        &crate::utils::hf::model_repo(tokenizer_repo)?,
+        "tokenizer_config.json",
+    )
+    .await?;
     let file = File::open(pth)?;
     let mut json: Value = serde_json::from_reader(BufReader::new(file))?;
     Ok(json["chat_template"].take())
@@ -166,9 +165,11 @@ impl ChatContext {
             bail!("no messages");
         }
         let template = self.env.get_template("chat").map_err(Error::msg)?;
+        // minijinja 3 不再为任意 Serialize 类型自动转 Value，先序列化成 Value 再进模板
+        let messages = minijinja::Value::from(minijinja::value::Serde(&self.messages));
         template
             .render(minijinja::context! {
-                messages => &self.messages,
+                messages => messages,
                 add_generation_prompt => self.add_generation_prompt,
                 enable_thinking => self.enable_thinking,
                 bos_token => "",

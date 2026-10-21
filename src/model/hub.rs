@@ -1,7 +1,6 @@
 use anyhow::Result;
 use candle::quantized::gguf_file::Content;
 use derive_new::new;
-use hf_hub::api::tokio::ApiBuilder;
 use serde::Deserialize;
 use strum::{Display, EnumString};
 use tokenizers::Tokenizer;

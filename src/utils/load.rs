@@ -1,96 +1,101 @@
-use anyhow::{Error, Result};
-use candle::quantized::gguf_file::Content;
-use candle_transformers::generation::{LogitsProcessor, Sampling};
-use futures_util::future::try_join_all;
-use hf_hub::api::tokio::ApiBuilder;
-use hf_hub::{Cache, Repo, api::tokio::Api};
+use anyhow::{Error, Result, anyhow};
+use hf_hub::repository::{HFRepository, RepoTypeModel};
 use regex::Regex;
 use std::{fs::File, path::PathBuf, process::Command};
-use tokenizers::{FromPretrainedParameters, Tokenizer};
+use tokenizers::Tokenizer;
 
-/// 从指定仓库下载GGUF模型文件,支持下载分片模型文件,会自动检测并合并分片
+use crate::utils::hf::{fetch, fetch_many, list_files_with_prefix, model_repo};
+
+/// 从指定仓库下载 GGUF 模型文件，支持下载分片模型文件，会自动检测并合并分片
 ///
 /// # 参数
 /// * `repo` - 模型仓库名
 /// * `filename` - 模型文件名(不带后缀)
 pub async fn download_gguf(repo: &str, filename: &str) -> Result<PathBuf> {
-    if let Some(path) = Cache::default().model(repo.to_string()).get(filename) {
-        Ok(path)
-    } else {
-        let repo = ApiBuilder::from_env().build()?.model(repo.to_string());
+    let repo = model_repo(repo)?;
 
-        // 获取不带后缀的文件名前缀用于分片检测
-        let filename_prefix = filename.strip_suffix(".gguf").unwrap_or(filename);
+    // 获取不带后缀的文件名前缀用于分片检测
+    let filename_prefix = filename.strip_suffix(".gguf").unwrap_or(filename);
 
-        // 模型可能分片, 收集前缀为 filename_prefix 的文件
-        let split_filenames: Vec<_> = repo
-            .info()
-            .await?
-            .siblings
-            .into_iter()
-            .map(|sibling| sibling.rfilename)
-            .filter(|s| s.starts_with(filename_prefix))
-            .collect();
+    // 模型可能分片, 收集前缀为 filename_prefix 的文件
+    // 走 tree 列表接口（单次分页请求），不拉整个仓库 info
+    let split_filenames = list_files_with_prefix(&repo, filename_prefix).await?;
 
-        // 如果没有分片，直接下载完整文件
-        if split_filenames.len() == 1 {
-            return Ok(repo.get(filename).await?);
-        }
+    // 如果没有分片，直接下载完整文件
+    if split_filenames.len() == 1 {
+        return fetch(&repo, &split_filenames[0]).await;
+    }
 
-        // 下载分片文件
-        let split_paths = try_join_all(split_filenames.iter().map(|f| repo.get(f))).await?;
+    // 下载分片文件
+    let split_paths = fetch_many(&repo, &split_filenames).await?;
 
-        let download_dir = split_paths[0].parent().unwrap();
+    let download_dir = split_paths[0]
+        .parent()
+        .ok_or_else(|| anyhow!("GGUF 分片文件缺少父目录"))?;
 
-        let merge_path = download_dir.join(format!("{filename_prefix}*"));
+    let merge_path = download_dir.join(format!("{filename_prefix}*"));
 
-        let output = Command::new("gguf-utils")
-            .arg("merge")
-            .arg(merge_path)
-            .arg("-o")
-            .arg(download_dir)
-            .output()?;
+    let output = Command::new("gguf-utils")
+        .arg("merge")
+        .arg(merge_path)
+        .arg("-o")
+        .arg(download_dir)
+        .output()
+        .map_err(|e| anyhow!("调用 gguf-utils 合并分片失败（需先 cargo install gguf-utils）: {e}"))?;
 
-        let stdout = String::from_utf8(output.stdout)?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "gguf-utils 合并失败: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
 
-        let re = Regex::new(r"\|\s*([^\|]+\.gguf)\s*\|")?;
+    let stdout = String::from_utf8(output.stdout)?;
 
-        let merged_path = re
-            .captures(&stdout)
-            .and_then(|cap| cap.get(1))
-            .map(|m| m.as_str().trim())
-            .ok_or_else(|| anyhow!("Failed to extract file path from output"))?;
+    let re = Regex::new(r"\|\s*([^\|]+\.gguf)\s*\|")?;
 
-        // 重命名文件
-        let new_path = download_dir.join(filename);
-        std::fs::rename(merged_path, &new_path)?;
+    let merged_path = re
+        .captures(&stdout)
+        .and_then(|cap| cap.get(1))
+        .map(|m| m.as_str().trim())
+        .ok_or_else(|| anyhow!("Failed to extract file path from output"))?;
 
-        Ok(new_path)
+    // 重命名文件
+    let new_path = download_dir.join(filename);
+    std::fs::rename(merged_path, &new_path)?;
+
+    Ok(new_path)
+}
+
+/// 加载 tokenizer.json（走 hf-hub 1.0 的缓存与鉴权，不再使用 tokenizers 的 http feature）
+pub async fn load_tokenizer(repo: &str) -> Result<Tokenizer> {
+    let path = fetch(&model_repo(repo)?, "tokenizer.json").await?;
+    Tokenizer::from_file(path).map_err(|e| Error::msg(e.to_string()))
+}
+
+/// 下载 safetensors 权重文件；单文件缺失时回退到分片 index.json
+pub async fn download_safetensors(repo: &HFRepository<RepoTypeModel>, filename: &str) -> Result<Vec<PathBuf>> {
+    match fetch(repo, filename).await {
+        Ok(single) => Ok(vec![single]),
+        Err(_) => repo.get_safetensors().await,
     }
 }
 
-pub fn load_tokenizer(repo: &str) -> Result<Tokenizer> {
-    let mut params = FromPretrainedParameters::default();
-    params.token = std::env::var("HF_TOKEN").ok();
-
-    Tokenizer::from_pretrained(repo, Some(params)).map_err(Error::msg)
-}
-
-/// ApiRepo 的扩展 trait，提供 safetensors 加载功能
+/// HFRepository 的扩展 trait，提供 safetensors 分片加载
 pub trait ApiRepoExt {
     /// 从 HuggingFace Hub 加载 safetensors 模型文件
     ///
     /// 根据 model.safetensors.index.json 文件加载所有分片的 safetensors 文件
-    fn get_safetensors(&self) -> impl std::future::Future<Output = Result<Vec<PathBuf>>> + Send;
+    fn get_safetensors(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<PathBuf>>> + Send;
 }
 
-impl ApiRepoExt for hf_hub::api::tokio::ApiRepo {
+impl ApiRepoExt for HFRepository<RepoTypeModel> {
     async fn get_safetensors(&self) -> Result<Vec<PathBuf>> {
         let json_file = "model.safetensors.index.json";
-        // 自行下载 index.json 文件 
-        // todo Header content-range is missing
-        let json_path = self.get(json_file).await?;
-        let json_file_handle = std::fs::File::open(json_path)?;
+        let json_path = fetch(self, json_file).await?;
+        let json_file_handle = File::open(json_path)?;
         let json: serde_json::Value = serde_json::from_reader(&json_file_handle)?;
 
         // 提取 weight_map
@@ -101,22 +106,16 @@ impl ApiRepoExt for hf_hub::api::tokio::ApiRepo {
         };
 
         // 收集所有唯一的 safetensors 文件名
-        let safetensors_files: Vec<String> = weight_map
+        let mut safetensors_files: Vec<String> = weight_map
             .values()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
+        safetensors_files.sort();
 
         // 并发下载所有文件
-        let download_futures: Vec<_> = safetensors_files
-            .iter()
-            .map(|filename| self.get(filename))
-            .collect();
-
-        let paths = try_join_all(download_futures).await?;
-
-        Ok(paths)
+        fetch_many(self, &safetensors_files).await
     }
 }
 
@@ -159,8 +158,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_hub_load_safetensors() -> Result<()> {
-        let api = ApiBuilder::from_env().build()?;
-        let repo = api.model("Qwen/Qwen3-8B".to_string());
+        let repo = model_repo("Qwen/Qwen3-8B")?;
         let paths = repo.get_safetensors().await?;
         assert!(!paths.is_empty());
         Ok(())

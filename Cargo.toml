@@ -14,17 +14,20 @@ anyhow = "1.0"
 tokio = "1.52"
 # intel-mkl-src = { version = "0.8", features = ["mkl-static-lp64-iomp"] }
 
-candle = { package = "candle-core", version = "0.10" }
-candle-nn = "0.10"
+candle = { package = "candle-core", version = "0.11" }
+candle-nn = "0.11"
 # feat mkl STATUS_DLL_NOT_FOUND
-candle-transformers = { version = "0.10", features = [
+candle-transformers = { version = "0.11", features = [
     "cuda",
     "flash-attn",
 ] }
-candle-examples = "0.10"
+candle-examples = "0.11"
 
-hf-hub = { version = "0.5", features = ["tokio"] }
-tokenizers = { version = "0.22", features = ["http"] }
+# hf-hub 1.0 API 重写（HFClient/HFRepository），tokio 异步为默认路径，不再有 tokio feature
+hf-hub = "1.0"
+# 与 candle-core 0.11 内部使用的版本保持一致（两边共用同一份类型）；
+# tokenizer 下载走 hf-hub 1.0，不再启用 tokenizers 的 http feature（它仍绑 hf-hub 0.4）
+tokenizers = "0.22"
 
 async-stream = "0.3"
 futures-core = "0.3"
@@ -39,11 +42,13 @@ serde = { version = "1.0", features = ["derive"] }
 serde_default_utils = { version = "0.3", features = ["inline"] }
 derive-new = "0.7"
 strum = { version = "0.28", features = ["derive"] }
-minijinja = { version = "2.19", features = ["loader"] }
-minijinja-contrib = { version = "2.19", features = ["pycompat"] }
+# minijinja 3 去掉了 loader feature；serde feature 才提供 value::Serde 包装（自定义结构体转模板值必需）
+minijinja = { version = "3.0", features = ["serde"] }
+minijinja-contrib = { version = "3.0", features = ["pycompat"] }
 regex = "1.12"
+# 与 hf-hub 1.0 共用同一代 reqwest（cargo 只会链接一份），blocking 仅 web_fetch 工具使用
 reqwest = { version = "0.13", features = ["blocking"] }
-image = "0.24"
+image = "0.25"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"

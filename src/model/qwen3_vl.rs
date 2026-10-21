@@ -13,7 +13,6 @@ use anyhow::{Context, Result};
 use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::qwen3_vl::{Config as Qwen3VLConfig, Qwen3VLModel};
-use hf_hub::api::tokio::ApiBuilder;
 use image::GenericImageView;
 use serde_json::Value;
 use tokenizers::Tokenizer;
@@ -21,7 +20,8 @@ use tokenizers::Tokenizer;
 use crate::model::VisionInput;
 use crate::model::hub::HubInfo;
 use crate::model::{VisionConfig, ModelInference};
-use crate::utils::load::{ApiRepoExt, load_tokenizer};
+use crate::utils::hf::{fetch, model_repo};
+use crate::utils::load::{ApiRepoExt, download_safetensors, load_tokenizer};
 
 // ─── 图像预处理常量 ───────────────────────────────────────────────────────────────
 
@@ -46,11 +46,10 @@ impl Drop for Qwen3VL {
 impl Qwen3VL {
     /// 加载 Qwen3VL 模型，返回 (模型包装, Tokenizer, eos_token_id)
     pub async fn load(hub_info: &HubInfo, device: &Device) -> Result<(Self, Tokenizer, u32)> {
-        let api = ApiBuilder::from_env().build()?;
-        let repo = api.model(hub_info.model_repo.clone());
+        let repo = model_repo(&hub_info.model_repo)?;
 
         // 下载并解析 config.json
-        let config_path = repo.get("config.json").await?;
+        let config_path = fetch(&repo, "config.json").await?;
         let config_content = std::fs::read_to_string(&config_path)?;
         let mut config_value: Value = serde_json::from_str(&config_content)?;
 
@@ -78,16 +77,13 @@ impl Qwen3VL {
 
         let vl_config: Qwen3VLConfig = serde_json::from_value(config_value.clone())?;
 
-        // 加载模型权重
-        let model_files = match repo.get(&hub_info.model_file).await {
-            Ok(single_file) => vec![single_file],
-            Err(_) => repo.get_safetensors().await?,
-        };
+        // 加载模型权重（单文件优先，缺失时回退分片）
+        let model_files = download_safetensors(&repo, &hub_info.model_file).await?;
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&model_files, DType::BF16, device)? };
         let model = Qwen3VLModel::new(&vl_config, vb)?;
 
         // 加载 tokenizer
-        let tokenizer = load_tokenizer(&hub_info.tokenizer_repo)?;
+        let tokenizer = load_tokenizer(&hub_info.tokenizer_repo).await?;
 
         let eos_token_id = config_value
             .get("eos_token_id")
@@ -164,7 +160,7 @@ pub fn preprocess_images(paths: &[&str], config: &VisionConfig, device: &Device)
     }
 
     let path = paths[0];
-    let img = image::io::Reader::open(path)
+    let img = image::ImageReader::open(path)
         .context(format!("无法打开图片: {}", path))?
         .decode()
         .context(format!("无法解码图片: {}", path))?;
