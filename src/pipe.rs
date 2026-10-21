@@ -5,7 +5,7 @@ use crate::model::registry::ModelRegistry;
 use crate::utils::chat::ChatContext;
 use anyhow::{Error, Result};
 use async_stream::try_stream;
-use candle::Tensor;
+use candle::{DType, Tensor};
 use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
 use candle_transformers::utils::apply_repeat_penalty;
@@ -391,7 +391,6 @@ impl ChatPipeline {
         };
 
         let input = Tensor::new(input_arr, &self.infer_conf.device)?.unsqueeze(0)?;
-
         let mut logits = self.model.forward(&input, idx_pos, vision)?;
         // 展平 leading 维度（GGUF 返回 (1, 1, vocab_size)，sample 需要 (vocab_size,)）
         while logits.rank() > 1 && logits.dim(0)? == 1 {
@@ -404,16 +403,52 @@ impl ChatPipeline {
                 let start_at = ans_tokens
                     .len()
                     .saturating_sub(self.infer_conf.repeat_last_n);
-                logits = apply_repeat_penalty(
-                    &logits,
-                    self.infer_conf.repeat_penalty,
-                    &ans_tokens[start_at..],
-                )?;
+                logits = repeat_penalty_inplace(&logits, self.infer_conf.repeat_penalty, &ans_tokens[start_at..])?;
             }
         }
 
         self.logits_processor.sample(&logits).map_err(Error::msg)
     }
+}
+
+
+/// 与 candle_transformers::utils::apply_repeat_penalty 数值等价，但避免整表回读。
+///
+/// 上游实现每次都把整个 logits（vocab≈248k×f32≈1MB）CPU↔GPU 搬两趟，
+/// 单次约 18ms，占每 token 总耗时的两成以上。这里只把被惩罚的那几个
+/// 位置的 logit 取下来（<= repeat_last_n 个标量），算完再写回，往返只有几 KB。
+fn repeat_penalty_inplace(logits: &Tensor, penalty: f32, context: &[u32]) -> Result<Tensor> {
+    if context.is_empty() || penalty == 1. {
+        return Ok(logits.clone());
+    }
+    let device = logits.device();
+    let vocab = logits.dim(0)?;
+
+    // 去重并丢掉越界 id（保持首次出现顺序，结果与 HashSet 版本一致）
+    let mut seen = std::collections::HashSet::new();
+    let mut ids: Vec<u32> = Vec::with_capacity(context.len());
+    for &t in context {
+        if (t as usize) < vocab && seen.insert(t) {
+            ids.push(t);
+        }
+    }
+    if ids.is_empty() {
+        return Ok(logits.clone());
+    }
+
+    // 只把被惩罚的位置取下来（<= repeat_last_n 个标量），算完用 index_add 写回
+    let idx = Tensor::from_vec(ids.clone(), ids.len(), device)?;
+    let picked = logits.index_select(&idx, 0)?.to_dtype(DType::F32)?;
+    let picked = picked.to_vec1::<f32>()?;
+    let adjusted: Vec<f32> = picked
+        .iter()
+        .map(|&v| if v >= 0. { v / penalty } else { v * penalty })
+        .collect();
+
+    // 差值写回：index_add(dim=0) 把 (n) 加到对应行上
+    let delta: Vec<f32> = adjusted.iter().zip(picked.iter()).map(|(n, o)| n - o).collect();
+    let delta = Tensor::from_vec(delta, ids.len(), device)?;
+    Ok(logits.index_add(&idx, &delta, 0)?)
 }
 
 #[cfg(test)]
@@ -424,6 +459,22 @@ mod tests {
     use futures_util::{StreamExt, pin_mut};
     use std::io;
     use std::io::Write;
+
+    /// repeat penalty 改写必须与 candle 上游实现数值一致
+    #[test]
+    fn test_repeat_penalty_matches_upstream() -> Result<()> {
+        let dev = candle::Device::Cpu;
+        let logits = candle::Tensor::new(
+            &[2.0f32, -3.0, 0.5, -0.25, 1.0, -6.0, 0.0, 4.5],
+            &dev,
+        )?;
+        let ctx = [1u32, 1, 3, 5, 99, 2, 2]; // 含重复与越界 id
+        let want = apply_repeat_penalty(&logits, 1.3, &ctx)?;
+        let got = repeat_penalty_inplace(&logits, 1.3, &ctx)?;
+        let diff = (&got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(diff < 1e-6, "与上游实现不一致: {diff}");
+        Ok(())
+    }
 
     #[tokio::test]
     #[ignore]

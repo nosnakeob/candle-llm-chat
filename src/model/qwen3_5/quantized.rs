@@ -462,6 +462,34 @@ impl GatedDeltaNetWeights {
             return Ok((core_attn_out, last_recurrent_state));
         }
 
+        // ── decode（seq_len == 1）：无循环、无 narrow，步骤数压到最少 ──────────
+        if seq_len == 1 {
+            let (b, h, kd) = (batch_size, num_heads, k_head_dim);
+            let vd = v_head_dim;
+            // 衰减：一次预展开 + 一次普通 mul（广播乘是 20 倍慢路径）
+            let g_e = g_exp.reshape((b, h, 1, 1))?
+                .broadcast_as((b, h, kd, vd))?
+                .contiguous()?;
+            last_recurrent_state = (&last_recurrent_state * &g_e)?;
+
+            // kv_mem = k · S   —— k 已是 (B,H,1,K)
+            let kv_mem = key_f32.matmul(&last_recurrent_state)?;
+
+            // δ = (v − kv_mem) · β，β 预展开成 (B,H,1,V)
+            let beta_e = beta_f32.reshape((b, h, 1, 1))?
+                .broadcast_as((b, h, 1, vd))?
+                .contiguous()?;
+            let delta = ((value_f32 - &kv_mem)? * &beta_e)?;
+
+            // S ← S + kᵀ·δ
+            let delta_k = key_f32.transpose(2, 3)?.matmul(&delta)?;
+            last_recurrent_state = (&last_recurrent_state + &delta_k)?;
+
+            // out = q · S'
+            let out = query_f32.matmul(&last_recurrent_state)?;
+            return Ok((out.transpose(1, 2)?, last_recurrent_state));
+        }
+
         for i in 0..seq_len {
             let q_t = query_f32.narrow(2, i, 1)?;
             let k_t = key_f32.narrow(2, i, 1)?;
@@ -469,20 +497,16 @@ impl GatedDeltaNetWeights {
             let g_t = g_exp.narrow(2, i, 1)?;
             let beta_t = beta_f32.narrow(2, i, 1)?;
 
-            // 衰减：g 已预展开成 (B,H,1,V)，走快路径的普通 mul
             let g_t = expand_decay(&g_t)?;
             last_recurrent_state = (&last_recurrent_state * &g_t)?;
 
             let kv_mem = k_t.matmul(&last_recurrent_state)?;
             let beta_t = expand_beta(&beta_t)?;
-            let delta = (&v_t - &kv_mem)?;
-            let delta = (&delta * &beta_t)?;
+            let delta = ((&v_t - &kv_mem)? * &beta_t)?;
 
-            // δk = k^T · δ 是外积，用 matmul 走 GEMM 而不是广播
             let delta_k = k_t.transpose(2, 3)?.matmul(&delta)?;
             last_recurrent_state = (&last_recurrent_state + &delta_k)?;
 
-            // 输出 = q · S'
             let out_t = q_t.matmul(&last_recurrent_state)?;
             core_attn_out_vec.push(out_t);
         }
@@ -879,29 +903,40 @@ fn gated_delta_step(
 /// 高效 depthwise conv1d（每通道独立卷积，kernel_size 小、通道多时远快于 candle 的 groups 分解）
 /// x: (b, c, l_in), weight: (c, 1, k) → 输出 (b, c, l_out)
 fn depthwise_conv1d(x: &Tensor, weight: &Tensor, padding: usize) -> Result<Tensor> {
-    let (_, c, _) = x.dims3()?;
+    let (b, c, _) = x.dims3()?;
     let k = weight.dim(2)?;
-    let w = weight.reshape((c, k))?.to_dtype(x.dtype())?; // (c, k)
 
-    // 用 k 次移位切片 + 广播乘加累积，替代 candle 的 groups 循环分解
-    // 输入先 pad 到 (b, c, padding + l_in)
+    // 用 k 次移位切片 + 乘加累积，替代 candle 的 groups 分解
     let x_padded = if padding > 0 {
-        // candle conv1d padding 语义: 左右各 pad `padding` 个
-        let zeros = Tensor::zeros((x.dim(0)?, c, padding), x.dtype(), x.device())?;
+        let zeros = Tensor::zeros((b, c, padding), x.dtype(), x.device())?;
         Tensor::cat(&[&zeros, x, &zeros], 2)?
     } else {
         x.clone()
     };
-    let l_out = x_padded.dim(2)? - k + 1;
+    let l_in = x_padded.dim(2)?;
+    if l_in < k {
+        candle::bail!("depthwise_conv1d: 输入长度 {l_in} 小于卷积核 {k}");
+    }
+    let l_out = l_in - k + 1;
+    let w = weight.reshape((c, k))?.to_dtype(x.dtype())?.contiguous()?;
 
-    // 累加: out += x_padded[:, :, i:i+l_out] * w[:, i]
+    // decode（L==1）走单次「行内点积」：x (b,c,k) ⊙ w (c,k) 再按 k 求和。
+    // 逐位置 multiply+add 的写法每次小算子约 30µs 固定开销，k=4 时要 10 次 ≈ 380µs；
+    // 合并成一次后实测 ~1µs（同一张量、数值误差 <1e-6）。
+    if l_out == 1 {
+        let xs = x_padded.reshape((b, c, k))?;
+        let w = w.reshape((1, c, k))?;
+        return (&xs * &w)?.sum(2)?.unsqueeze(2);
+    }
+
+    // prefill：逐位置累加（L>1 时窗口重叠，仍按位移累加）
     let mut acc = x_padded
         .narrow(2, 0, l_out)?
         .broadcast_mul(&w.narrow(1, 0, 1)?.reshape((1, c, 1))?)?;
     for i in 1..k {
         let xi = x_padded.narrow(2, i, l_out)?;
         let wi = w.narrow(1, i, 1)?.reshape((1, c, 1))?;
-        acc = acc.broadcast_add(&xi.broadcast_mul(&wi)?)?;
+        acc = (&acc + &xi.broadcast_mul(&wi)?)?;
     }
     Ok(acc)
 }
