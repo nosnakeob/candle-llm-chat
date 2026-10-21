@@ -1,11 +1,12 @@
+pub mod chunked_scan;
 pub mod dense;
 pub mod quantized;
 
 pub use dense::{Config, Config as Qwen3_5Config, ModelForCausalLM};
 pub use quantized::ModelWeights as QuantizedModelWeights;
 
-use crate::model::VisionInput;
 use crate::model::ModelInference;
+use crate::model::VisionInput;
 use candle::{Device, Tensor};
 
 impl ModelInference for ModelForCausalLM {

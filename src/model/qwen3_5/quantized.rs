@@ -6,12 +6,12 @@
 //! Based on the Qwen 3.5 architecture and implemented with quantized weights
 //! for reduced memory usage and faster inference.
 //!
+use candle::quantized::{QTensor, gguf_file};
+use candle::{D, DType, Device, Module, Result, Tensor};
+use candle_nn::{Activation, Embedding, kv_cache::ConcatKvCache};
 use candle_transformers::models::with_tracing::QMatMul;
 use candle_transformers::quantized_nn::RmsNorm;
 use candle_transformers::utils::repeat_kv;
-use candle::quantized::{gguf_file, QTensor};
-use candle::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{kv_cache::ConcatKvCache, Activation, Embedding};
 use std::io::{Read, Seek};
 use std::sync::Arc;
 
@@ -182,10 +182,10 @@ impl AttentionWeights {
 
         let q_out = self.q_proj.forward(x)?;
         let q_out = q_out.reshape((b, l, self.num_heads, self.head_dim * 2))?;
-        
+
         let q = q_out.narrow(D::Minus1, 0, self.head_dim)?.transpose(1, 2)?;
         let gate = q_out.narrow(D::Minus1, self.head_dim, self.head_dim)?;
-        
+
         let k = self.k_proj.forward(x)?;
         let v = self.v_proj.forward(x)?;
 
@@ -225,12 +225,13 @@ impl AttentionWeights {
         }
         let probs = candle_nn::ops::softmax_last_dim(&scores)?;
         let ctx = probs.matmul(&v)?;
-        
+
         let ctx = ctx.transpose(1, 2)?;
         // Apply sigmoid gate
-        let gate_sigmoid = candle_nn::ops::sigmoid(&gate.to_dtype(DType::F32)?)?.to_dtype(ctx.dtype())?;
+        let gate_sigmoid =
+            candle_nn::ops::sigmoid(&gate.to_dtype(DType::F32)?)?.to_dtype(ctx.dtype())?;
         let ctx = ctx.broadcast_mul(&gate_sigmoid)?;
-        
+
         let reshaped_ctx = ctx.reshape((b, l, self.num_heads * self.head_dim))?;
         self.o_proj.forward(&reshaped_ctx)
     }
@@ -250,19 +251,19 @@ struct GatedDeltaNetWeights {
     value_dim: usize,
     conv_dim: usize,
     conv_kernel_size: usize,
-    
+
     in_proj_qkv: QMatMul,
     in_proj_z: QMatMul,
     in_proj_b: QMatMul,
     in_proj_a: QMatMul,
     out_proj: QMatMul,
-    
+
     conv1d_weight: Tensor,
     dt_bias_f32: Tensor,
     neg_a_f32: Tensor,
     norm_weight: Tensor,
     norm_eps: f64,
-    
+
     conv_state: Option<Tensor>,
     recurrent_state: Option<Tensor>,
 }
@@ -290,17 +291,24 @@ impl GatedDeltaNetWeights {
         let (in_proj_a, _) = gg.qmatmul(&format!("{prefix}.ssm_alpha.weight"))?;
         let (out_proj, _) = gg.qmatmul(&format!("{prefix}.ssm_out.weight"))?;
 
-        let conv1d_weight = gg.tensor(&format!("{prefix}.ssm_conv1d.weight"))?
+        let conv1d_weight = gg
+            .tensor(&format!("{prefix}.ssm_conv1d.weight"))?
             .dequantize(&gg.device)?
             .unsqueeze(1)?;
-        
-        let a_log = gg.tensor(&format!("{prefix}.ssm_a"))?.dequantize(&gg.device)?;
-        let dt_bias = gg.tensor(&format!("{prefix}.ssm_dt.bias"))?.dequantize(&gg.device)?;
-        
+
+        let a_log = gg
+            .tensor(&format!("{prefix}.ssm_a"))?
+            .dequantize(&gg.device)?;
+        let dt_bias = gg
+            .tensor(&format!("{prefix}.ssm_dt.bias"))?
+            .dequantize(&gg.device)?;
+
         let dt_bias_f32 = dt_bias.to_dtype(DType::F32)?;
         let neg_a_f32 = (&a_log.to_dtype(DType::F32)?.exp()? * -1.0)?;
-        
-        let norm_weight = gg.tensor(&format!("{prefix}.ssm_norm.weight"))?.dequantize(&gg.device)?;
+
+        let norm_weight = gg
+            .tensor(&format!("{prefix}.ssm_norm.weight"))?
+            .dequantize(&gg.device)?;
 
         Ok(Self {
             num_v_heads,
@@ -336,11 +344,13 @@ impl GatedDeltaNetWeights {
         let x_dtype = x.dtype();
         let x_f32 = x.to_dtype(DType::F32)?;
         let g_f32 = g.to_dtype(DType::F32)?;
-        
+
         let gate = g_f32.silu()?;
         let norm_x = (x_f32.sqr()?.mean_keepdim(D::Minus1)? + self.norm_eps)?.sqrt()?;
         let x_normed = x_f32.broadcast_div(&norm_x)?;
-        (x_normed * gate)?.broadcast_mul(&self.norm_weight.to_dtype(DType::F32)?)?.to_dtype(x_dtype)
+        (x_normed * gate)?
+            .broadcast_mul(&self.norm_weight.to_dtype(DType::F32)?)?
+            .to_dtype(x_dtype)
     }
 
     fn torch_recurrent_gated_delta_rule(
@@ -354,26 +364,55 @@ impl GatedDeltaNetWeights {
     ) -> Result<(Tensor, Tensor)> {
         let query = Self::l2_norm(query)?;
         let key = Self::l2_norm(key)?;
-        
+
         let query = query.transpose(1, 2)?;
         let key = key.transpose(1, 2)?;
         let value = value.transpose(1, 2)?;
         let beta = beta.transpose(1, 2)?;
         let g = g.transpose(1, 2)?;
-        
+
         let (batch_size, num_heads, seq_len, k_head_dim) = key.dims4()?;
         let v_head_dim = value.dim(3)?;
-        
+
+        // 注：上游 PR #3461 的分块 WY 扫描（chunked_scan）已引入，但实测在本机的
+        // CPU storage 路径上 prefill 反而更慢（t=18 每层 13ms vs 逐 token 0.46ms），
+        // 因此默认仍走逐 token 递推；需要时用 Q35_CHUNKED_PREFILL=1 显式启用。
+        if std::env::var_os("Q35_CHUNKED_PREFILL").is_some() && seq_len > 1 {
+            let mut state = match initial_state {
+                Some(state) => state.to_dtype(DType::F32)?.contiguous()?,
+                None => Tensor::zeros(
+                    (batch_size, num_heads, k_head_dim, v_head_dim),
+                    DType::F32,
+                    query.device(),
+                )?,
+            };
+            // 扫描模块用 [b, t, n_heads, d]，此处张量是 [b, n_heads, t, d]
+            let q_c = query.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()?;
+            let k_c = key.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()?;
+            let v_c = value.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()?;
+            let beta_c = beta.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()?;
+            let g_c = g.to_dtype(DType::F32)?.transpose(1, 2)?.contiguous()?;
+            let log_g = g_c.clamp(f32::MIN_POSITIVE as f64, f64::INFINITY)?.log()?;
+            let out = crate::model::qwen3_5::chunked_scan::gated_delta_rule_chunked(
+                &q_c, &k_c, &v_c, &log_g, &beta_c, &mut state,
+            )?;
+            return Ok((out.transpose(1, 2)?, state));
+        }
+
         let scale = 1.0 / (query.dim(3)? as f64).sqrt();
         let query = (query * scale)?;
-        
+
         let mut core_attn_out_vec = Vec::with_capacity(seq_len);
-        
+
         let mut last_recurrent_state = match initial_state {
             Some(state) => state.to_dtype(DType::F32)?,
-            None => Tensor::zeros((batch_size, num_heads, k_head_dim, v_head_dim), DType::F32, query.device())?,
+            None => Tensor::zeros(
+                (batch_size, num_heads, k_head_dim, v_head_dim),
+                DType::F32,
+                query.device(),
+            )?,
         };
-        
+
         let query_f32 = query.to_dtype(DType::F32)?.contiguous()?;
         let key_f32 = key.to_dtype(DType::F32)?.contiguous()?;
         let value_f32 = value.to_dtype(DType::F32)?.contiguous()?;
@@ -410,17 +449,17 @@ impl GatedDeltaNetWeights {
             let beta_t = beta_f32.narrow(2, i, 1)?;
 
             last_recurrent_state = last_recurrent_state.broadcast_mul(&g_t)?;
-            
+
             let kv_mem = k_t.matmul(&last_recurrent_state)?;
             let delta = (&v_t - &kv_mem)?.broadcast_mul(&beta_t)?;
-            
+
             let delta_k = k_t.transpose(2, 3)?.matmul(&delta)?;
             last_recurrent_state = (&last_recurrent_state + &delta_k)?;
-            
+
             let out_t = q_t.matmul(&last_recurrent_state)?;
             core_attn_out_vec.push(out_t);
         }
-        
+
         let core_attn_out = Tensor::cat(&core_attn_out_vec, 2)?;
         let core_attn_out = core_attn_out.transpose(1, 2)?;
         Ok((core_attn_out, last_recurrent_state))
@@ -429,17 +468,17 @@ impl GatedDeltaNetWeights {
     fn forward(&mut self, hidden_states: &Tensor) -> Result<Tensor> {
         let (batch_size, seq_len, _) = hidden_states.dims3()?;
         let initial_dtype = hidden_states.dtype();
-        
-        let mixed_qkv = self.in_proj_qkv.forward(hidden_states)?.transpose(1, 2)?; 
-        
+
+        let mixed_qkv = self.in_proj_qkv.forward(hidden_states)?.transpose(1, 2)?;
+
         let z = self.in_proj_z.forward(hidden_states)?;
         let z = z.reshape((batch_size, seq_len, (), self.head_v_dim))?;
-        
+
         let b = self.in_proj_b.forward(hidden_states)?;
         let a = self.in_proj_a.forward(hidden_states)?;
-        
+
         let use_precomputed_states = self.conv_state.is_some() && seq_len == 1;
-        
+
         let t_conv = std::time::Instant::now();
         let mixed_qkv = if use_precomputed_states {
             let conv_state = self.conv_state.as_mut().unwrap();
@@ -449,25 +488,29 @@ impl GatedDeltaNetWeights {
             candle_nn::ops::silu(&out)?
         } else {
             let pad = self.conv_kernel_size - 1;
-            let padding = Tensor::zeros((batch_size, self.conv_dim, pad), mixed_qkv.dtype(), mixed_qkv.device())?;
+            let padding = Tensor::zeros(
+                (batch_size, self.conv_dim, pad),
+                mixed_qkv.dtype(),
+                mixed_qkv.device(),
+            )?;
             let padded_qkv = Tensor::cat(&[&padding, &mixed_qkv], 2)?;
             self.conv_state = Some(padded_qkv.narrow(2, seq_len, pad)?);
             let out = depthwise_conv1d(&padded_qkv, &self.conv1d_weight, 0)?;
             candle_nn::ops::silu(&out)?
         };
-        
+
         self.conv1d_weight.device().synchronize().ok();
         let dt_conv = t_conv.elapsed();
         let mixed_qkv = mixed_qkv.transpose(1, 2)?;
-        
+
         let q = mixed_qkv.narrow(D::Minus1, 0, self.key_dim)?;
         let k = mixed_qkv.narrow(D::Minus1, self.key_dim, self.key_dim)?;
         let v = mixed_qkv.narrow(D::Minus1, self.key_dim * 2, self.value_dim)?;
-        
+
         let q = q.reshape((batch_size, seq_len, (), self.head_k_dim))?;
         let k = k.reshape((batch_size, seq_len, (), self.head_k_dim))?;
         let v = v.reshape((batch_size, seq_len, (), self.head_v_dim))?;
-        
+
         let beta = candle_nn::ops::sigmoid(&b)?;
         let g = {
             let a_f32 = a.to_dtype(DType::F32)?;
@@ -475,30 +518,33 @@ impl GatedDeltaNetWeights {
             let softplus = (a_plus_dt.exp()? + 1.0)?.log()?;
             self.neg_a_f32.broadcast_mul(&softplus)?
         };
-        
+
         let repeat_n = self.num_v_heads / self.num_k_heads;
         let q = repeat_interleave(&q, repeat_n, 2)?;
         let k = repeat_interleave(&k, repeat_n, 2)?;
-        
+
         let initial_state = if use_precomputed_states {
             self.recurrent_state.as_ref()
         } else {
             None
         };
-        
+
         let t_dr = std::time::Instant::now();
-        let (core_attn_out, new_state) = self.torch_recurrent_gated_delta_rule(&q, &k, &v, &g, &beta, initial_state)?;
+        let (core_attn_out, new_state) =
+            self.torch_recurrent_gated_delta_rule(&q, &k, &v, &g, &beta, initial_state)?;
         q.device().synchronize().ok();
         let dt_dr = t_dr.elapsed();
         self.recurrent_state = Some(new_state);
-        
+
         let core_attn_out = core_attn_out.to_dtype(initial_dtype)?;
-        let core_attn_out = core_attn_out.reshape((batch_size, seq_len, self.num_v_heads, self.head_v_dim))?;
+        let core_attn_out =
+            core_attn_out.reshape((batch_size, seq_len, self.num_v_heads, self.head_v_dim))?;
         let core_attn_out = core_attn_out.reshape(((), self.head_v_dim))?;
         let z_flat = z.reshape(((), self.head_v_dim))?;
         let core_attn_out = self.rms_norm_gated(&core_attn_out, &z_flat)?;
-        let core_attn_out = core_attn_out.reshape((batch_size, seq_len, self.num_v_heads * self.head_v_dim))?;
-        
+        let core_attn_out =
+            core_attn_out.reshape((batch_size, seq_len, self.num_v_heads * self.head_v_dim))?;
+
         let out = self.out_proj.forward(&core_attn_out);
         if std::env::var("Q35_PERF").is_ok() && seq_len <= 2 {
             tracing::info!("[q35-gdn] conv={dt_conv:.1?} delta_rule={dt_dr:.1?}");
@@ -511,7 +557,6 @@ impl GatedDeltaNetWeights {
         self.recurrent_state = None;
     }
 }
-
 
 // ─── 融合算子：Gated DeltaNet 单 token 递推 ────────────────────────────────────
 //
@@ -577,8 +622,8 @@ impl GatedDeltaStepArgs {
             debug_assert_eq!((skd, svd), (dim, vd), "state 真实维度与参数不一致");
             for t in 0..seq {
                 let qp = (i * seq + t) * qstride; // q 按 (b, h, seq, q_stride) 索引
-                let kp = (i * seq + t) * dim;     // k 按 (b, h, seq, k) 索引
-                let vp = (i * seq + t) * vd;      // v/out 按 (b, h, seq, v) 索引
+                let kp = (i * seq + t) * dim; // k 按 (b, h, seq, k) 索引
+                let vp = (i * seq + t) * vd; // v/out 按 (b, h, seq, v) 索引
                 // packed 布局里 q 的真实数据从 k 偏移处开始（前 k 位是 gate）
                 let q = unsafe { std::slice::from_raw_parts(self.q.add(qp + self.k_offset), dim) };
                 let k = unsafe { std::slice::from_raw_parts(self.k.add(kp), dim) };
@@ -622,7 +667,17 @@ impl GatedDeltaStepArgs {
     }
 
     /// 通用版（K ≠ V）：q/k 支持按 num_v_heads 广播（bq/hq 可为 1）
-    fn step_general(&self, b: usize, h: usize, seq: usize, kd: usize, vd: usize, bq: usize, hq: usize, vq: usize) -> Vec<f32> {
+    fn step_general(
+        &self,
+        b: usize,
+        h: usize,
+        seq: usize,
+        kd: usize,
+        vd: usize,
+        bq: usize,
+        hq: usize,
+        vq: usize,
+    ) -> Vec<f32> {
         let _ = (bq, hq, vq);
         let mut out = vec![0f32; b * h * seq * vd];
         let mut delta = vec![0f32; h * vd];
@@ -688,14 +743,28 @@ fn gated_delta_step(
     let (b, h, kd, vd) = state.dims4()?; // state: (B, H, K, V)
     let seq = 1;
     for (tensor, name, rank) in [
-        (q, "q", 4), (k, "k", 4), (v, "v", 4), (g, "g", 3), (beta, "beta", 3),
+        (q, "q", 4),
+        (k, "k", 4),
+        (v, "v", 4),
+        (g, "g", 3),
+        (beta, "beta", 3),
     ] {
         if tensor.rank() != rank {
-            candle::bail!("gated_delta_step: {name} 期望 {rank} 维，实际 {:?}", tensor.dims());
+            candle::bail!(
+                "gated_delta_step: {name} 期望 {rank} 维，实际 {:?}",
+                tensor.dims()
+            );
         }
     }
     // 所有输入必须是连续的 f32 CPU 张量：state 会被原地改写，非连续会打错内存
-    for (tensor, name) in [(state, "state"), (q, "q"), (k, "k"), (v, "v"), (g, "g"), (beta, "beta")] {
+    for (tensor, name) in [
+        (state, "state"),
+        (q, "q"),
+        (k, "k"),
+        (v, "v"),
+        (g, "g"),
+        (beta, "beta"),
+    ] {
         let (guard, layout) = tensor.storage_and_layout();
         if !layout.is_contiguous() {
             candle::bail!("gated_delta_step: {name} 不是连续内存（请先 .contiguous()）");
@@ -713,8 +782,20 @@ fn gated_delta_step(
     let (bv, hv, sv, vq) = v.dims4()?;
     let (gb, gh, gs) = g.dims3()?;
     let (bb, bh, bs) = beta.dims3()?;
-    if sq != seq || sv != seq || gs != seq || bs != seq || kq < kd || vq != vd
-        || bq != b || hq != h || bv != b || hv != h || gb != b || gh != h || bb != b || bh != h
+    if sq != seq
+        || sv != seq
+        || gs != seq
+        || bs != seq
+        || kq < kd
+        || vq != vd
+        || bq != b
+        || hq != h
+        || bv != b
+        || hv != h
+        || gb != b
+        || gh != h
+        || bb != b
+        || bh != h
     {
         candle::bail!(
             "gated_delta_step 形状不匹配: state={b}x{h}x{kd}x{vd} q={bq}x{hq}x{sq}x{kq} v={bv}x{hv}x{sv}x{vq} g={gb}x{gh}x{gs} beta={bb}x{bh}x{bs}"
@@ -778,7 +859,9 @@ fn depthwise_conv1d(x: &Tensor, weight: &Tensor, padding: usize) -> Result<Tenso
     let l_out = x_padded.dim(2)? - k + 1;
 
     // 累加: out += x_padded[:, :, i:i+l_out] * w[:, i]
-    let mut acc = x_padded.narrow(2, 0, l_out)?.broadcast_mul(&w.narrow(1, 0, 1)?.reshape((1, c, 1))?)?;
+    let mut acc = x_padded
+        .narrow(2, 0, l_out)?
+        .broadcast_mul(&w.narrow(1, 0, 1)?.reshape((1, c, 1))?)?;
     for i in 1..k {
         let xi = x_padded.narrow(2, i, l_out)?;
         let wi = w.narrow(1, i, 1)?.reshape((1, c, 1))?;
@@ -863,7 +946,10 @@ impl LayerWeights {
 
         let mlp = MlpWeights::new(gg, &prefix)?;
         let input_layernorm = gg.rms_norm(&format!("{prefix}.attn_norm.weight"), rms_norm_eps)?;
-        let post_attention_layernorm = gg.rms_norm(&format!("{prefix}.post_attention_norm.weight"), rms_norm_eps)?;
+        let post_attention_layernorm = gg.rms_norm(
+            &format!("{prefix}.post_attention_norm.weight"),
+            rms_norm_eps,
+        )?;
 
         Ok(Self {
             token_mixer,
@@ -873,7 +959,15 @@ impl LayerWeights {
         })
     }
 
-    fn forward(&mut self, x: &Tensor, mask: Option<&Tensor>, offset: usize, layer_kind: &mut &'static str, t_mixer: Option<&mut std::time::Duration>, t_mlp: Option<&mut std::time::Duration>) -> Result<Tensor> {
+    fn forward(
+        &mut self,
+        x: &Tensor,
+        mask: Option<&Tensor>,
+        offset: usize,
+        layer_kind: &mut &'static str,
+        t_mixer: Option<&mut std::time::Duration>,
+        t_mlp: Option<&mut std::time::Duration>,
+    ) -> Result<Tensor> {
         let residual = x;
         let x = self.input_layernorm.forward(x)?;
         let t0 = std::time::Instant::now();
@@ -891,7 +985,7 @@ impl LayerWeights {
             *d += t0.elapsed();
         }
         let x = (residual + x)?;
-        
+
         let residual = &x;
         let x = self.post_attention_layernorm.forward(&x)?;
         let x = x.apply(&self.mlp)?;
@@ -923,15 +1017,13 @@ impl ModelWeights {
         device: &Device,
     ) -> Result<Self> {
         let mut gg = Gguf::new(ct, reader, device.clone());
-        let md_get = |s: &str| {
-            match gg.metadata().get(s) {
-                Some(v) => Ok(v),
-                None => {
-                    let s35 = s.replace("qwen3.", "qwen35.");
-                    match gg.metadata().get(&s35) {
-                        Some(v) => Ok(v),
-                        None => candle::bail!("cannot find {s} or {s35} in metadata"),
-                    }
+        let md_get = |s: &str| match gg.metadata().get(s) {
+            Some(v) => Ok(v),
+            None => {
+                let s35 = s.replace("qwen3.", "qwen35.");
+                match gg.metadata().get(&s35) {
+                    Some(v) => Ok(v),
+                    None => candle::bail!("cannot find {s} or {s35} in metadata"),
                 }
             }
         };
@@ -939,16 +1031,16 @@ impl ModelWeights {
         let num_attention_heads = md_get("qwen3.attention.head_count")?.to_u32()? as usize;
         let num_kv_heads = md_get("qwen3.attention.head_count_kv")?.to_u32()? as usize;
         let key_length = md_get("qwen3.attention.key_length")?.to_u32()? as usize;
-        
-        let head_dim = key_length; 
+
+        let head_dim = key_length;
         let num_layers = md_get("qwen3.block_count")?.to_u32()? as usize;
         let hidden_size = md_get("qwen3.embedding_length")?.to_u32()? as usize;
         let max_position_embeddings = md_get("qwen3.context_length")?.to_u32()? as usize;
         let rms_norm_eps = md_get("qwen3.attention.layer_norm_rms_epsilon")?.to_f32()? as f64;
         let rope_freq_base = md_get("qwen3.rope.freq_base")?.to_f32()? as f64;
-        
+
         let full_attention_interval = md_get("qwen3.full_attention_interval")?.to_u32()? as usize;
-        
+
         // Linear attention specifics
         let linear_num_key_heads = md_get("qwen3.ssm.group_count")?.to_u32()? as usize;
         let ssm_inner_size = md_get("qwen3.ssm.inner_size")?.to_u32()? as usize;
@@ -1014,23 +1106,10 @@ impl ModelWeights {
         })
     }
 
-    fn causal_mask(
-        &self,
-        b: usize,
-        tgt: usize,
-        offset: usize,
-    ) -> Result<Tensor> {
+    fn causal_mask(&self, b: usize, tgt: usize, offset: usize) -> Result<Tensor> {
         let minf = f32::NEG_INFINITY;
         let mask: Vec<_> = (0..tgt)
-            .flat_map(|i| {
-                (0..(tgt + offset)).map(move |j| {
-                    if j <= i + offset {
-                        0.
-                    } else {
-                        minf
-                    }
-                })
-            })
+            .flat_map(|i| (0..(tgt + offset)).map(move |j| if j <= i + offset { 0. } else { minf }))
             .collect();
         Tensor::from_slice(&mask, (b, 1, tgt, tgt + offset), &self.device)?.to_dtype(self.dtype)
     }
@@ -1052,8 +1131,21 @@ impl ModelWeights {
         for layer in &mut self.layers {
             let mut kind = "";
             let (mut tm, mut tp) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
-            h = layer.forward(&h, causal_mask.as_ref(), offset, &mut kind, Some(&mut tm), Some(&mut tp))?;
-            if kind == "gdn" { n_gdn += 1; gdn_mix += tm; } else { n_full += 1; full_mix += tm; }
+            h = layer.forward(
+                &h,
+                causal_mask.as_ref(),
+                offset,
+                &mut kind,
+                Some(&mut tm),
+                Some(&mut tp),
+            )?;
+            if kind == "gdn" {
+                n_gdn += 1;
+                gdn_mix += tm;
+            } else {
+                n_full += 1;
+                full_mix += tm;
+            }
             mlp_t += tp;
         }
         if std::env::var("Q35_PERF").is_ok() {
