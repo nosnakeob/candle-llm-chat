@@ -49,7 +49,10 @@ mod tests {
             sample_len: SAMPLE_LEN,
             ..Default::default()
         };
-        let mut pipe = ChatPipeline::new("qwen3_5.0_8b_q4", conf).await?;
+        // 允许用环境变量换模型，用来对比不同规模下每 token 固定开销被摊薄的程度
+        let model_id = std::env::var("BENCH_MODEL").unwrap_or_else(|_| "qwen3_5.0_8b_q4".into());
+        println!("model = {model_id}");
+        let mut pipe = ChatPipeline::new(&model_id, conf).await?;
 
         // 预热一次（首轮包含 CUDA 上下文初始化与 kernel 编译）
         let _ = run_once(&mut pipe).await?;
