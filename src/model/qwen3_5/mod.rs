@@ -19,8 +19,9 @@ impl ModelInference for ModelForCausalLM {
         self.forward(x, index_pos).map_err(anyhow::Error::msg)
     }
 
-    fn clr_kv_cache(&mut self) {
+    fn reset_kv_cache(&mut self) -> anyhow::Result<()> {
         self.clear_kv_cache();
+        Ok(())
     }
 }
 
@@ -34,7 +35,8 @@ impl ModelInference for QuantizedModelWeights {
         self.forward(x, index_pos).map_err(anyhow::Error::msg)
     }
 
-    fn clr_kv_cache(&mut self) {
+    fn reset_kv_cache(&mut self) -> anyhow::Result<()> {
         self.clear_kv_cache();
+        Ok(())
     }
 }

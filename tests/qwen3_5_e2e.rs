@@ -4,9 +4,9 @@
 //! 首次运行会从 HF 下载模型（走 HF_ENDPOINT=hf-mirror 可加速）
 #[cfg(test)]
 mod tests {
-    use candle_llm_chat::pipe::ChatPipeline;
     use anyhow::Result;
-    use futures_util::{pin_mut, StreamExt};
+    use candle_llm_chat::pipe::ChatPipeline;
+    use futures_util::{StreamExt, pin_mut};
 
     /// 验证 GGUF 量化版 Qwen3.5-0.8B 的完整对话链路：
     /// 模型加载 → chat template 渲染 → GDN 线性注意力前向 → 流式输出 → 多轮上下文
@@ -42,10 +42,7 @@ mod tests {
         }
 
         // 基本合理性：回答应为可读文本而非乱码/空转
-        let printable_ratio = full_answer
-            .chars()
-            .filter(|c| !c.is_control())
-            .count() as f64
+        let printable_ratio = full_answer.chars().filter(|c| !c.is_control()).count() as f64
             / full_answer.chars().count() as f64;
         assert!(
             printable_ratio > 0.9,

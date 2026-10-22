@@ -131,9 +131,11 @@ impl ChatPipeline {
     // ─── Agent 接口 ──────────────────────────────────────────────────────
 
     /// 清空对话历史（保留 system prompt），同时丢弃 KV cache / GDN 状态
-    pub fn clear_history(&mut self) {
+    ///
+    /// 对不支持清缓存的模型（Qwen3-MoE、Qwen3-VL）在已有上下文时会返回错误。
+    pub fn clear_history(&mut self) -> Result<()> {
         self.ctx.clear_history();
-        self.model.clr_kv_cache();
+        self.model.reset_kv_cache()
     }
 
     pub fn inject_system_prompt(&mut self, system_prompt: &str) -> Result<()> {
@@ -190,7 +192,7 @@ impl ChatPipeline {
     ) -> impl Stream<Item = Result<String>> + 'a {
         try_stream! {
             // 先清缓存再渲染 prompt：清缓存必须在编码之前，否则首 token 会带旧状态
-            self.model.clr_kv_cache();
+            self.model.reset_kv_cache()?;
 
             let rendered = self.ctx.render()?;
             let mut ctx_tokens = self.str2tokens(&rendered)?;

@@ -33,6 +33,9 @@ pub struct Qwen3VL {
     model: Qwen3VLModel,
     pub(crate) vision_config: VisionConfig,
     device: Device,
+    /// candle 0.11 的 Qwen3VLTextModel 把每层 KV cache 放在 Arc<Mutex<KvCache>> 里，
+    /// 构造时分配、没有清空接口。用它区分首次生成与多轮重生成，后者直接报错。
+    has_context: bool,
 }
 
 impl Drop for Qwen3VL {
@@ -106,6 +109,7 @@ impl Qwen3VL {
                 model,
                 vision_config,
                 device: device.clone(),
+                has_context: false,
             },
             tokenizer,
             eos_token_id,
@@ -120,6 +124,7 @@ impl ModelInference for Qwen3VL {
         index_pos: usize,
         vision: Option<&VisionInput>,
     ) -> Result<candle::Tensor> {
+        self.has_context = true;
         if let Some(v) = vision {
             // 预填充阶段：传入图像数据
             let seq_len = x.dim(1)?;
@@ -154,8 +159,12 @@ impl ModelInference for Qwen3VL {
         }
     }
 
-    fn clr_kv_cache(&mut self) {
-        // Qwen3VLModel 的 KV cache 通过内部 Arc<Mutex<KvCache>> 管理，无需外部清理
+    fn reset_kv_cache(&mut self) -> Result<()> {
+        crate::model::reject_multi_turn(
+            self.has_context,
+            "Qwen3-VL",
+            "candle 0.11 的 Qwen3VLModel 把 KV cache 放在内部 Arc<Mutex<KvCache>> 里且无清空接口",
+        )
     }
 
     fn vision_config(&self) -> Option<&VisionConfig> {

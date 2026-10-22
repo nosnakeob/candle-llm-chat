@@ -61,9 +61,13 @@ mod tests {
         for round in 0..3 {
             // 每轮清空历史：否则上一轮的长回答会留在 prompt 里，长度逐轮翻倍，
             // 测到的是"上下文越来越长"，而不是稳定的 decode 速率。
-            pipe.clear_history();
+            pipe.clear_history()?;
             let (tokens, prefill, decode) = run_once(&mut pipe).await?;
-            let rate = if decode > 0.0 { tokens as f64 / decode } else { 0.0 };
+            let rate = if decode > 0.0 {
+                tokens as f64 / decode
+            } else {
+                0.0
+            };
             println!(
                 "round {round}: {tokens} tok | prefill {prefill:.3}s | decode {decode:.2}s = {rate:.2} tok/s"
             );

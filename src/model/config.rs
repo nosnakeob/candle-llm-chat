@@ -105,7 +105,7 @@ impl ModelLoader {
                         device,
                         DType::F32,
                     )?;
-                Box::new(Qwen3MoEModel { inner: model })
+                Box::new(Qwen3MoEModel::new(model))
             }
             "qwen3.5" | "qwen35" => {
                 let model =

@@ -242,7 +242,11 @@ mod tests {
     /// 验证 <think> 标签内容被过滤，只保留回答部分
     #[tokio::test]
     async fn test_thinking_content_stripped() -> Result<()> {
-        let mut ctx = ChatContext::from_repo("Qwen/Qwen3-4B-Instruct-2507").await?;
+        // 用内联模板：单元测试不该依赖网络下载（原来 from_repo 会去 HF 取模板，
+        // 网络抖动或限流时这个测试会随机失败）
+        let mut ctx = ChatContext::from_template(
+            "{% for m in messages %}{{ m.role }}: {{ m.content }}\n{% endfor %}",
+        )?;
         ctx.push_msg("hello");
         ctx.push_msg("<think>let me think about this</think>hi there!");
 
