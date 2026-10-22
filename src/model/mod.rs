@@ -1,8 +1,7 @@
 use anyhow::Result;
-use candle::quantized::gguf_file::Content;
-use candle::{Device, Tensor};
+use candle::Tensor;
 use candle_transformers::models::{quantized_qwen3, quantized_qwen3_moe, qwen3};
-use std::io::{Read, Seek};pub mod config;
+pub mod config;
 pub mod hub;
 pub mod qwen3_5;
 pub mod qwen3_vl;
@@ -46,7 +45,12 @@ macro_rules! impl_model_traits {
 }
 
 pub trait ModelInference {
-    fn forward(&mut self, x: &Tensor, index_pos: usize, vision: Option<&VisionInput>) -> Result<Tensor>;
+    fn forward(
+        &mut self,
+        x: &Tensor,
+        index_pos: usize,
+        vision: Option<&VisionInput>,
+    ) -> Result<Tensor>;
 
     fn clr_kv_cache(&mut self);
 
@@ -56,10 +60,7 @@ pub trait ModelInference {
     }
 }
 
-impl_model_traits!(
-    quantized_qwen3::ModelWeights,
-    qwen3::ModelForCausalLM
-);
+impl_model_traits!(quantized_qwen3::ModelWeights, qwen3::ModelForCausalLM);
 
 /// GGUFQWenMoE 的封装，提供 clr_kv_cache
 pub struct Qwen3MoEModel {

@@ -7,7 +7,7 @@ pub use quantized::ModelWeights as QuantizedModelWeights;
 
 use crate::model::ModelInference;
 use crate::model::VisionInput;
-use candle::{Device, Tensor};
+use candle::Tensor;
 
 impl ModelInference for ModelForCausalLM {
     fn forward(

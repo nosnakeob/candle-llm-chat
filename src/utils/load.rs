@@ -41,7 +41,9 @@ pub async fn download_gguf(repo: &str, filename: &str) -> Result<PathBuf> {
         .arg("-o")
         .arg(download_dir)
         .output()
-        .map_err(|e| anyhow!("调用 gguf-utils 合并分片失败（需先 cargo install gguf-utils）: {e}"))?;
+        .map_err(|e| {
+            anyhow!("调用 gguf-utils 合并分片失败（需先 cargo install gguf-utils）: {e}")
+        })?;
 
     if !output.status.success() {
         anyhow::bail!(
@@ -74,7 +76,10 @@ pub async fn load_tokenizer(repo: &str) -> Result<Tokenizer> {
 }
 
 /// 下载 safetensors 权重文件；单文件缺失时回退到分片 index.json
-pub async fn download_safetensors(repo: &HFRepository<RepoTypeModel>, filename: &str) -> Result<Vec<PathBuf>> {
+pub async fn download_safetensors(
+    repo: &HFRepository<RepoTypeModel>,
+    filename: &str,
+) -> Result<Vec<PathBuf>> {
     match fetch(repo, filename).await {
         Ok(single) => Ok(vec![single]),
         Err(_) => repo.get_safetensors().await,
@@ -86,9 +91,7 @@ pub trait ApiRepoExt {
     /// 从 HuggingFace Hub 加载 safetensors 模型文件
     ///
     /// 根据 model.safetensors.index.json 文件加载所有分片的 safetensors 文件
-    fn get_safetensors(
-        &self,
-    ) -> impl std::future::Future<Output = Result<Vec<PathBuf>>> + Send;
+    fn get_safetensors(&self) -> impl std::future::Future<Output = Result<Vec<PathBuf>>> + Send;
 }
 
 impl ApiRepoExt for HFRepository<RepoTypeModel> {

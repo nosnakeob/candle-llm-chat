@@ -14,23 +14,22 @@
 //! 2. 解析 JSON 中的 `name` 和 `arguments` 字段
 //! 3. 支持在同一个响应中包含多个工具调用
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use regex::Regex;
 use serde::Deserialize;
 use std::sync::LazyLock;
 
 /// XML 包裹格式正则（编译一次，全局复用）
-static RE_TOOL_CALL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<tool_call>\s*(\{.*?\})\s*</tool_call>").expect("valid regex")
-});
+static RE_TOOL_CALL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<tool_call>\s*(\{.*?\})\s*</tool_call>").expect("valid regex"));
 
 /// strip 用的移除正则
-static RE_TOOL_CALL_STRIP: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"<tool_call>\s*\{.*?\}\s*</tool_call>\n?").expect("valid regex")
-});
+static RE_TOOL_CALL_STRIP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<tool_call>\s*\{.*?\}\s*</tool_call>\n?").expect("valid regex"));
 
 /// 连续空行压缩
-static RE_EMPTY_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").expect("valid regex"));
+static RE_EMPTY_LINES: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\n{3,}").expect("valid regex"));
 
 /// ToolCallParser 从模型输出中提取 tool_call 块
 ///

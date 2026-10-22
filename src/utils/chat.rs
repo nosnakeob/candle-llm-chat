@@ -14,9 +14,15 @@ use std::ops::{Deref, DerefMut};
 fn template_env() -> Environment<'static> {
     let mut env = Environment::new();
     env.set_unknown_method_callback(pycompat::unknown_method_callback);
-    env.add_function("raise_exception", |msg: String| -> Result<String, minijinja::Error> {
-        Err(minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, msg))
-    });
+    env.add_function(
+        "raise_exception",
+        |msg: String| -> Result<String, minijinja::Error> {
+            Err(minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                msg,
+            ))
+        },
+    );
     env
 }
 

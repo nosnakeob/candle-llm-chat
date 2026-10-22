@@ -30,22 +30,19 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// 创建 Agent（无工具）
+    /// 默认模型 + 默认工具（read_file、web_fetch）
     pub async fn new() -> Result<Self> {
-        Self::with_default_tools().await
+        let mut agent = Self::with_model_and_tools("qwen3", ToolRegistry::new()).await?;
+        agent.register_default_tools()?;
+        Ok(agent)
     }
 
-    /// 使用指定模型创建 Agent（无工具）
+    /// 指定模型、不注册工具（退化为普通对话）
     pub async fn with_model(model_id: &str) -> Result<Self> {
         Self::with_model_and_tools(model_id, ToolRegistry::new()).await
     }
 
-    /// 创建 Agent（带默认工具：文件读取）
-    pub async fn with_default_tools() -> Result<Self> {
-        Self::with_model_and_tools("qwen3", ToolRegistry::new()).await?.register_default_tools()
-    }
-
-    /// 使用指定模型和工具注册表创建 Agent
+    /// 指定模型和工具注册表
     pub async fn with_model_and_tools(model_id: &str, tools: ToolRegistry) -> Result<Self> {
         let tool_system_prompt = tools.system_prompt_snippet();
         Ok(Self {
@@ -56,11 +53,11 @@ impl Agent {
     }
 
     /// 注册默认工具（read_file + web_fetch）
-    pub fn register_default_tools(mut self) -> Result<Self> {
+    fn register_default_tools(&mut self) -> Result<()> {
         self.tools.register(FileReadTool::new())?;
         self.tools.register(WebFetchTool::new())?;
         self.tool_system_prompt = self.tools.system_prompt_snippet();
-        Ok(self)
+        Ok(())
     }
 
     /// 注册自定义工具
@@ -112,10 +109,7 @@ impl Agent {
 
                 if tool_calls.is_empty() {
                     // 没有工具调用，流式输出清理后的内容并结束
-                    let cleaned = ToolCallParser::strip(&raw_response);
-                    for c in cleaned.chars() {
-                        yield c.to_string();
-                    }
+                    yield ToolCallParser::strip(&raw_response);
                     break;
                 }
 
@@ -150,7 +144,7 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::{pin_mut, StreamExt};
+    use futures_util::{StreamExt, pin_mut};
 
     /// 集成测试：模型通过 tool calling 读取 eml 文件并回答问题
     ///
@@ -166,7 +160,7 @@ mod tests {
             "From: boss@company.com\nTo: employee@company.com\nSubject: 项目进度汇报\nDate: Mon, 1 Jan 2025 10:00:00 +0800\n\n你好，请在本周五前提交Q1季度的项目进度报告，包括已完成的功能、遇到的问题以及下一步计划。谢谢。",
         ).unwrap();
 
-        let mut agent = Agent::with_default_tools().await?;
+        let mut agent = Agent::new().await?;
 
         let prompt = format!(
             "请读取这封邮件并告诉我它要求我做什么，路径是：{}",
@@ -202,11 +196,9 @@ mod tests {
     async fn test_chat_with_web_fetch() -> Result<()> {
         // let _proxy = crate::utils::env_guard::ProxyGuard::new(7890);
 
-        let mut agent = Agent::with_default_tools().await?;
+        let mut agent = Agent::new().await?;
 
-        let stream = agent.chat(
-            "请访问 https://example.com 并告诉我这个页面的主要内容是什么",
-        );
+        let stream = agent.chat("请访问 https://example.com 并告诉我这个页面的主要内容是什么");
         pin_mut!(stream);
 
         let mut answer = String::new();

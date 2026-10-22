@@ -1,9 +1,8 @@
+use crate::model::hub::{HubInfo, ModelArch};
 use crate::model::{ModelInference, Qwen3MoEModel};
-use crate::model::hub::{HubInfo, ModelArch, ModelType};
-use crate::model::registry::ModelRegistry;
 use crate::utils::hf::{fetch, model_repo};
-use crate::utils::load::{ApiRepoExt, download_gguf, download_safetensors, load_tokenizer};
-use anyhow::{Result, anyhow};
+use crate::utils::load::{download_gguf, download_safetensors, load_tokenizer};
+use anyhow::Result;
 use candle::quantized::gguf_file::Content;
 use candle::quantized::tokenizer::TokenizerFromGguf;
 use candle::{DType, Device};
@@ -12,7 +11,6 @@ use candle_transformers::models::{
     quantized_qwen3,
     qwen3::{Config as Qwen3Config, ModelForCausalLM as Qwen3Model},
 };
-use serde_json::Value;
 use std::fs::File;
 use tokenizers::Tokenizer;
 
@@ -101,13 +99,17 @@ impl ModelLoader {
             }
             "qwen3_moe" | "qwen2_moe" => {
                 let model =
-                    candle_transformers::models::quantized_qwen3_moe::GGUFQWenMoE::from_gguf(ct, &mut file, device, DType::F32)?;
+                    candle_transformers::models::quantized_qwen3_moe::GGUFQWenMoE::from_gguf(
+                        ct,
+                        &mut file,
+                        device,
+                        DType::F32,
+                    )?;
                 Box::new(Qwen3MoEModel { inner: model })
             }
             "qwen3.5" | "qwen35" => {
-                let model = crate::model::qwen3_5::QuantizedModelWeights::from_gguf(
-                    ct, &mut file, device,
-                )?;
+                let model =
+                    crate::model::qwen3_5::QuantizedModelWeights::from_gguf(ct, &mut file, device)?;
                 Box::new(model)
             }
             _ => bail!("不支持的 GGUF 架构: {arch}"),
@@ -163,6 +165,7 @@ impl ModelLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::registry::ModelRegistry;
 
     #[tokio::test]
     #[ignore] // 需要下载模型文件
@@ -171,10 +174,18 @@ mod tests {
         let registry = ModelRegistry::new()?;
 
         // 测试加载 GGUF 量化模型
-        assert!(ModelLoader::load(registry.get("qwen3.4b_q4")?, &device).await.is_ok());
+        assert!(
+            ModelLoader::load(registry.get("qwen3.4b_q4")?, &device)
+                .await
+                .is_ok()
+        );
 
         // 测试加载 Safetensors 完整模型
-        assert!(ModelLoader::load(registry.get("qwen3.4b_base")?, &device).await.is_ok());
+        assert!(
+            ModelLoader::load(registry.get("qwen3.4b_base")?, &device)
+                .await
+                .is_ok()
+        );
 
         // 测试加载不存在的模型
         assert!(

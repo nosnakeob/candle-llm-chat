@@ -13,15 +13,14 @@ use anyhow::{Context, Result};
 use candle::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::qwen3_vl::{Config as Qwen3VLConfig, Qwen3VLModel};
-use image::GenericImageView;
 use serde_json::Value;
 use tokenizers::Tokenizer;
 
 use crate::model::VisionInput;
 use crate::model::hub::HubInfo;
-use crate::model::{VisionConfig, ModelInference};
+use crate::model::{ModelInference, VisionConfig};
 use crate::utils::hf::{fetch, model_repo};
-use crate::utils::load::{ApiRepoExt, download_safetensors, load_tokenizer};
+use crate::utils::load::{download_safetensors, load_tokenizer};
 
 // ─── 图像预处理常量 ───────────────────────────────────────────────────────────────
 
@@ -87,7 +86,11 @@ impl Qwen3VL {
 
         let eos_token_id = config_value
             .get("eos_token_id")
-            .or_else(|| config_value.get("text_config").and_then(|tc| tc.get("eos_token_id")))
+            .or_else(|| {
+                config_value
+                    .get("text_config")
+                    .and_then(|tc| tc.get("eos_token_id"))
+            })
             .and_then(|x| x.as_u64())
             .unwrap_or(151643) as u32;
 
@@ -98,7 +101,15 @@ impl Qwen3VL {
             image_token_id: vl_config.image_token_id,
         };
 
-        Ok((Self { model, vision_config, device: device.clone() }, tokenizer, eos_token_id))
+        Ok((
+            Self {
+                model,
+                vision_config,
+                device: device.clone(),
+            },
+            tokenizer,
+            eos_token_id,
+        ))
     }
 }
 
@@ -129,7 +140,15 @@ impl ModelInference for Qwen3VL {
         } else {
             // 解码阶段：纯文本
             let logits = self.model.forward(
-                x, None, None, None, None, vec![1], vec![], vec![], &[index_pos],
+                x,
+                None,
+                None,
+                None,
+                None,
+                vec![1],
+                vec![],
+                vec![],
+                &[index_pos],
             )?;
             Ok(logits.to_dtype(DType::F32)?)
         }
@@ -154,7 +173,11 @@ pub struct PreprocessResult {
 }
 
 /// 预处理图像：加载 → resize → 归一化 → 构造视觉张量
-pub fn preprocess_images(paths: &[&str], config: &VisionConfig, device: &Device) -> Result<PreprocessResult> {
+pub fn preprocess_images(
+    paths: &[&str],
+    config: &VisionConfig,
+    device: &Device,
+) -> Result<PreprocessResult> {
     if paths.is_empty() {
         anyhow::bail!("no images provided");
     }
@@ -189,10 +212,8 @@ pub fn preprocess_images(paths: &[&str], config: &VisionConfig, device: &Device)
                 for _t in 0..config.temporal_patch_size {
                     for y in 0..config.patch_size {
                         for x in 0..config.patch_size {
-                            let pv = rgb.get_pixel(
-                                (x_off + x) as u32,
-                                (y_off + y) as u32,
-                            )[c] as f32;
+                            let pv =
+                                rgb.get_pixel((x_off + x) as u32, (y_off + y) as u32)[c] as f32;
                             pixel_data.push((pv / 255.0 - mean) / std);
                         }
                     }
@@ -225,11 +246,16 @@ pub fn build_vision_prompt(prompt: &str, num_placeholders: usize) -> String {
 
 /// 在 token 序列中查找连续的 image token 区间
 pub fn find_image_token_span(tokens: &[u32], image_token_id: u32) -> Vec<Vec<(usize, usize)>> {
-    let positions: Vec<usize> = tokens.iter().enumerate()
+    let positions: Vec<usize> = tokens
+        .iter()
+        .enumerate()
         .filter(|&(_, id)| *id == image_token_id)
-        .map(|(i, _)| i).collect();
+        .map(|(i, _)| i)
+        .collect();
 
-    if positions.is_empty() { return vec![]; }
+    if positions.is_empty() {
+        return vec![];
+    }
     let start = positions[0];
     let end = positions[positions.len() - 1] + 1;
     vec![vec![(start, end)]]

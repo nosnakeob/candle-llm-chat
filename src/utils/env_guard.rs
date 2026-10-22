@@ -80,7 +80,11 @@ mod tests {
             assert_eq!(env::var("HF_ENDPOINT").unwrap(), "https://hf-mirror.com");
         }
 
-        assert_eq!(env::var("HF_ENDPOINT").unwrap(), original, "Drop 后应恢复原始值");
+        assert_eq!(
+            env::var("HF_ENDPOINT").unwrap(),
+            original,
+            "Drop 后应恢复原始值"
+        );
 
         unsafe { env::remove_var("HF_ENDPOINT") };
     }

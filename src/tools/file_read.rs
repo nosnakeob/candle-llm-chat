@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::{Tool, ToolDef};
 
@@ -54,9 +54,9 @@ impl FileReadTool {
         }
 
         if let Some(ref root) = self.root_dir {
-            let abs_root = Path::new(root).canonicalize()
-                .context("根目录不存在")?;
-            let abs_path = Path::new(path).canonicalize()
+            let abs_root = Path::new(root).canonicalize().context("根目录不存在")?;
+            let abs_path = Path::new(path)
+                .canonicalize()
                 .context(format!("路径不存在或无法访问: {}", path))?;
 
             // 确保路径在根目录内
@@ -187,7 +187,10 @@ mod tests {
 
     #[test]
     fn test_read_text() {
-        let path = tmp_file("tool_test_read_text.txt", "Hello, world!\n这是一段测试文本。");
+        let path = tmp_file(
+            "tool_test_read_text.txt",
+            "Hello, world!\n这是一段测试文本。",
+        );
         let content = read_text(&path, 1024).unwrap();
         assert!(content.contains("Hello"));
         assert!(content.contains("测试文本"));

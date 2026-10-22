@@ -13,8 +13,8 @@ use candle_transformers::models::with_tracing::QMatMul;
 use candle_transformers::quantized_nn::RmsNorm;
 use candle_transformers::utils::repeat_kv;
 use std::io::{Read, Seek};
-use std::time::Instant;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct Gguf<R: Read + Seek> {
     ct: gguf_file::Content,
@@ -445,7 +445,8 @@ impl GatedDeltaNetWeights {
             let (b, h, kd) = (batch_size, num_heads, k_head_dim);
             let vd = v_head_dim;
             // 衰减：一次预展开 + 一次普通 mul（广播乘是 20 倍慢路径）
-            let g_e = g_exp.reshape((b, h, 1, 1))?
+            let g_e = g_exp
+                .reshape((b, h, 1, 1))?
                 .broadcast_as((b, h, kd, vd))?
                 .contiguous()?;
             last_recurrent_state = (&last_recurrent_state * &g_e)?;
@@ -454,7 +455,8 @@ impl GatedDeltaNetWeights {
             let kv_mem = key_f32.matmul(&last_recurrent_state)?;
 
             // δ = (v − kv_mem) · β，β 预展开成 (B,H,1,V)
-            let beta_e = beta_f32.reshape((b, h, 1, 1))?
+            let beta_e = beta_f32
+                .reshape((b, h, 1, 1))?
                 .broadcast_as((b, h, 1, vd))?
                 .contiguous()?;
             let delta = ((value_f32 - &kv_mem)? * &beta_e)?;
@@ -733,7 +735,7 @@ impl LayerWeights {
         offset: usize,
         layer_kind: &mut &'static str,
         t_mixer: Option<&mut std::time::Duration>,
-        t_mlp: Option<&mut std::time::Duration>,
+        _t_mlp: Option<&mut std::time::Duration>,
     ) -> Result<Tensor> {
         let residual = x;
         let x = self.input_layernorm.forward(x)?;

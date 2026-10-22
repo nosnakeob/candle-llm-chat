@@ -52,7 +52,10 @@ pub fn model_repo(repo_id: &str) -> Result<HFRepository<RepoTypeModel>> {
 /// 下载单个文件，返回本地缓存路径
 ///
 /// hf-hub 1.0 的下载接口是 bon builder 风格，必须 `.send()` 才会真正发请求。
-pub async fn fetch(repo: &HFRepository<RepoTypeModel>, filename: &str) -> Result<std::path::PathBuf> {
+pub async fn fetch(
+    repo: &HFRepository<RepoTypeModel>,
+    filename: &str,
+) -> Result<std::path::PathBuf> {
     Ok(repo.download_file().filename(filename).send().await?)
 }
 
@@ -61,7 +64,9 @@ pub async fn fetch_many(
     repo: &HFRepository<RepoTypeModel>,
     filenames: &[String],
 ) -> Result<Vec<std::path::PathBuf>> {
-    let futures = filenames.iter().map(|f| repo.download_file().filename(f).send());
+    let futures = filenames
+        .iter()
+        .map(|f| repo.download_file().filename(f).send());
     Ok(futures_util::future::try_join_all(futures).await?)
 }
 

@@ -2,10 +2,10 @@
 //!
 //! 负责管理所有可用工具，提供工具查找、执行、JSON Schema 导出功能。
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::HashMap;
 
-use super::{Tool, ToolDef};
+use super::Tool;
 
 /// 工具注册表
 pub struct ToolRegistry {
@@ -83,7 +83,9 @@ impl ToolRegistry {
         }
 
         let mut lines = vec![
-            String::from("你是一个可以调用工具的助手。当用户的请求需要使用工具才能完成时，你必须调用对应的工具，不能假装自己无法执行或直接编造结果。"),
+            String::from(
+                "你是一个可以调用工具的助手。当用户的请求需要使用工具才能完成时，你必须调用对应的工具，不能假装自己无法执行或直接编造结果。",
+            ),
             String::from("\n## 可用工具\n"),
         ];
 
@@ -122,6 +124,7 @@ impl Default for ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ToolDef;
 
     struct DummyTool;
     impl Tool for DummyTool {
@@ -148,9 +151,7 @@ mod tests {
         assert!(registry.has("dummy"));
         assert_eq!(registry.tool_names(), vec!["dummy"]);
 
-        let result = registry
-            .execute("dummy", &serde_json::json!({}))
-            .unwrap();
+        let result = registry.execute("dummy", &serde_json::json!({})).unwrap();
         assert_eq!(result, "dummy result");
     }
 

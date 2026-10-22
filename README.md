@@ -3,7 +3,7 @@
 基于 [Candle](https://github.com/huggingface/candle) 框架的 **Rust 本地 LLM 推理引擎**，支持 Qwen3 系列的 GGUF 量化版和 Safetensors 完整版推理，内置 Agent 工具调用循环，以及 Qwen3-VL 多模态图文对话。
 
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange)](https://www.rust-lang.org/)
-[![Candle](https://img.shields.io/badge/candle-0.10-blue)](https://github.com/huggingface/candle)
+[![Candle](https://img.shields.io/badge/candle-0.11-blue)](https://github.com/huggingface/candle)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
@@ -21,7 +21,7 @@
 | **聊天上下文** | MiniJinja 模板渲染，自动角色切换，`<think>` 隔离 |
 | **Agent 工具调用** | `<tool_call>JSON</tool_call>` 解析，最多 10 轮循环 |
 | **内置工具** | 文件读取（路径穿越防护）、网页抓取（HTML → Markdown） |
-| **多模态** | Qwen3-VL 文本推理已就绪，图像输入接口预留 |
+| **多模态** | Qwen3-VL 图文对话（`chat_with_images`） |
 
 ---
 
@@ -45,20 +45,29 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
 export HF_ENDPOINT="https://hf-mirror.com"
 ```
 
-### 基本使用
+### 命令行（最快跑起来）
+
+```bash
+cargo run --release --example chat                        # 默认提示词
+cargo run --release --example chat -- "介绍一下你自己"     # 自定义提示词
+cargo run --release --example agent                       # 带工具调用的 Agent
+cargo run --release --example vision -- 图片路径 "描述这张图"  # 多模态（需 VL 模型）
+```
+
+### 当库使用
 
 ```rust
-use candle_llm_chat::pipe::TextGeneration;
+use candle_llm_chat::pipe::ChatPipeline;
 use futures_util::{StreamExt, pin_mut};
 
-// 使用默认模型（qwen3.8b_q4）
-let mut gen = TextGeneration::default().await?;
+// 使用 models.toml 里 [qwen3] 下 default = true 的模型
+let mut pipe = ChatPipeline::default().await?;
 
-let stream = gen.chat("介绍一下自己");
+let stream = pipe.chat("介绍一下自己");
 pin_mut!(stream);
 
-while let Some(Ok(token)) = stream.next().await {
-    print!("{}", token);
+while let Some(chunk) = stream.next().await {
+    print!("{}", chunk?);
 }
 ```
 
@@ -104,7 +113,7 @@ User prompt → Agent::chat()
 ### 纯聊天
 
 ```
-User prompt → TextGeneration::chat()
+User prompt → ChatPipeline::chat()
   → ChatContext::push_msg()             # 自动角色切换，剥离 <think>
   → ChatContext::render()               # MiniJinja 模板
   → tokenize → 自回归解码循环
@@ -119,7 +128,7 @@ User prompt → TextGeneration::chat()
 ```
 src/
 ├── lib.rs              # 库入口
-├── pipe.rs             # TextGeneration — 推理主管线（流式 + 完整响应）
+├── pipe.rs             # ChatPipeline — 推理主管线（流式 + 完整响应）
 ├── agent.rs            # Agent — 工具调用循环，最大 10 轮
 ├── qwen3_vl.rs         # Qwen3-VL 多模态独立管线
 ├── model/
@@ -147,13 +156,13 @@ src/
 
 ```rust
 // 架构默认模型
-let gen = TextGeneration::with_default_config("qwen3").await?;
+let pipe = ChatPipeline::with_default_config("qwen3").await?;
 
 // GGUF 量化版（体积小、速度快）
-let gen = TextGeneration::with_default_config("qwen3.4b_q4").await?;
+let pipe = ChatPipeline::with_default_config("qwen3.4b_q4").await?;
 
 // Safetensors 完整版（精度更高）
-let gen = TextGeneration::with_default_config("qwen3.8b_base").await?;
+let pipe = ChatPipeline::with_default_config("qwen3.8b_base").await?;
 
 // 用 Agent 指定模型
 let mut agent = Agent::with_model("qwen3.4b_q4").await?;
@@ -171,7 +180,7 @@ let config = InferenceConfig {
     ..Default::default()
 };
 
-let mut gen = TextGeneration::new("qwen3.8b_q4", config).await?;
+let mut pipe = ChatPipeline::new("qwen3.8b_q4", config).await?;
 ```
 
 ### 自定义工具
@@ -196,7 +205,7 @@ impl Tool for MyTool {
     }
 }
 
-let mut agent = Agent::with_default_tools().await?;
+let mut agent = Agent::new().await?;
 agent.register_tool(MyTool)?;
 ```
 
@@ -216,7 +225,7 @@ let _proxy = ProxyGuard::new(7897);  // Drop 时自动恢复
 
 - **模型加载**：GGUF 量化 + Safetensors 完整版，自动识别分发
 - **模型注册表**：`models.toml` → `ModelRegistry`，`tokenizer_repo` 自动继承
-- **流式聊天**：`TextGeneration::chat()` 基于 `async-stream`
+- **流式聊天**：`ChatPipeline::chat()` 基于 `async-stream`
 - **完整响应**：`chat_full()` 供 Agent 内部调用
 - **多轮对话**：`ChatContext` + MiniJinja 模板，自动角色切换，`<think>` 剥离
 - **推理参数**：温度、采样长度、重复惩罚、KV Cache

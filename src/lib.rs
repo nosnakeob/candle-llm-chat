@@ -1,7 +1,6 @@
+// anyhow! / bail! 在本 crate 内以非限定形式使用，需要 macro_use
 #[macro_use]
 extern crate anyhow;
-#[macro_use]
-extern crate tracing;
 #[macro_use]
 extern crate serde_default_utils;
 

@@ -1,6 +1,6 @@
 use crate::model::ModelInference;
-use crate::model::config::{InferenceConfig, ModelLoader};
 use crate::model::VisionInput;
+use crate::model::config::{InferenceConfig, ModelLoader};
 use crate::model::registry::ModelRegistry;
 use crate::utils::chat::ChatContext;
 use anyhow::{Error, Result};
@@ -8,7 +8,6 @@ use async_stream::try_stream;
 use candle::{DType, Tensor};
 use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
-use candle_transformers::utils::apply_repeat_penalty;
 use futures_core::stream::Stream;
 use serde_json::Value;
 use std::fs;
@@ -97,7 +96,11 @@ impl ChatPipeline {
             let prompt = self.ctx.render()?;
             let mut ctx_tokens = self.str2tokens(&prompt)?;
             if std::env::var_os("Q35_PERF").is_some() {
-                tracing::info!("[q35-prefill] prompt_tokens={} msgs={}", ctx_tokens.len(), self.ctx.messages.len());
+                tracing::info!(
+                    "[q35-prefill] prompt_tokens={} msgs={}",
+                    ctx_tokens.len(),
+                    self.ctx.messages.len()
+                );
             }
 
             let start = std::time::Instant::now();
@@ -110,7 +113,9 @@ impl ChatPipeline {
                 let next_token = if index == 0 {
                     self.gen_next_token(&ctx_tokens, 0, None, None)?
                 } else {
-                    if decode_start.is_none() { decode_start = Some(std::time::Instant::now()); }
+                    if decode_start.is_none() {
+                        decode_start = Some(std::time::Instant::now());
+                    }
                     self.gen_next_token(
                         &ctx_tokens,
                         ans_start_idx + index - 1,
@@ -137,7 +142,12 @@ impl ChatPipeline {
                 decoded += 1;
             }
             if let Some(ds) = decode_start {
-                info!("[q35-perf] decode total: {} tok in {:.1?} = {:.2} tok/s", decoded, ds.elapsed(), decoded as f64 / ds.elapsed().as_secs_f64());
+                info!(
+                    "[q35-perf] decode total: {} tok in {:.1?} = {:.2} tok/s",
+                    decoded,
+                    ds.elapsed(),
+                    decoded as f64 / ds.elapsed().as_secs_f64()
+                );
             }
 
             if let Some(t) = self.tos.decode_rest()? {
@@ -171,14 +181,15 @@ impl ChatPipeline {
             }
         };
 
-        let preprocessed = match qwen3_vl::preprocess_images(images, &vision_config, &self.infer_conf.device) {
-            Ok(pp) => pp,
-            Err(e) => {
-                return Box::pin(try_stream! {
-                    yield format!("[图像预处理失败: {}]", e);
-                });
-            }
-        };
+        let preprocessed =
+            match qwen3_vl::preprocess_images(images, &vision_config, &self.infer_conf.device) {
+                Ok(pp) => pp,
+                Err(e) => {
+                    return Box::pin(try_stream! {
+                        yield format!("[图像预处理失败: {}]", e);
+                    });
+                }
+            };
         let full_prompt = qwen3_vl::build_vision_prompt(prompt, preprocessed.num_placeholders);
         self.ctx.push_msg(&full_prompt);
 
@@ -301,10 +312,7 @@ impl ChatPipeline {
     // ─── 内部方法 ────────────────────────────────────────────────────────
 
     /// 共享生成循环，vision_data 为 (pixel_values, image_grid_thw, image_token_id)
-    fn generate_inner(
-        &mut self,
-        vision_data: Option<(Tensor, Tensor, u32)>,
-    ) -> Result<String> {
+    fn generate_inner(&mut self, vision_data: Option<(Tensor, Tensor, u32)>) -> Result<String> {
         let mut answer = String::with_capacity(1024);
         self.model.clr_kv_cache();
 
@@ -403,14 +411,17 @@ impl ChatPipeline {
                 let start_at = ans_tokens
                     .len()
                     .saturating_sub(self.infer_conf.repeat_last_n);
-                logits = repeat_penalty_inplace(&logits, self.infer_conf.repeat_penalty, &ans_tokens[start_at..])?;
+                logits = repeat_penalty_inplace(
+                    &logits,
+                    self.infer_conf.repeat_penalty,
+                    &ans_tokens[start_at..],
+                )?;
             }
         }
 
         self.logits_processor.sample(&logits).map_err(Error::msg)
     }
 }
-
 
 /// 与 candle_transformers::utils::apply_repeat_penalty 数值等价，但避免整表回读。
 ///
@@ -446,7 +457,11 @@ fn repeat_penalty_inplace(logits: &Tensor, penalty: f32, context: &[u32]) -> Res
         .collect();
 
     // 差值写回：index_add(dim=0) 把 (n) 加到对应行上
-    let delta: Vec<f32> = adjusted.iter().zip(picked.iter()).map(|(n, o)| n - o).collect();
+    let delta: Vec<f32> = adjusted
+        .iter()
+        .zip(picked.iter())
+        .map(|(n, o)| n - o)
+        .collect();
     let delta = Tensor::from_vec(delta, ids.len(), device)?;
     Ok(logits.index_add(&idx, &delta, 0)?)
 }
@@ -454,7 +469,7 @@ fn repeat_penalty_inplace(logits: &Tensor, penalty: f32, context: &[u32]) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::get_user_prompt;
+    use candle_transformers::utils::apply_repeat_penalty;
     use anyhow::Result;
     use futures_util::{StreamExt, pin_mut};
     use std::io;
@@ -464,10 +479,7 @@ mod tests {
     #[test]
     fn test_repeat_penalty_matches_upstream() -> Result<()> {
         let dev = candle::Device::Cpu;
-        let logits = candle::Tensor::new(
-            &[2.0f32, -3.0, 0.5, -0.25, 1.0, -6.0, 0.0, 4.5],
-            &dev,
-        )?;
+        let logits = candle::Tensor::new(&[2.0f32, -3.0, 0.5, -0.25, 1.0, -6.0, 0.0, 4.5], &dev)?;
         let ctx = [1u32, 1, 3, 5, 99, 2, 2]; // 含重复与越界 id
         let want = apply_repeat_penalty(&logits, 1.3, &ctx)?;
         let got = repeat_penalty_inplace(&logits, 1.3, &ctx)?;
@@ -505,7 +517,7 @@ mod tests {
         let mut pipe = ChatPipeline::with_default_config("qwen3.4b_abliterated").await?;
 
         for _ in 0..3 {
-            let prompt_str = get_user_prompt();
+            let prompt_str = "介绍一下你自己".to_string();
 
             let stream = pipe.chat(&prompt_str);
             pin_mut!(stream);

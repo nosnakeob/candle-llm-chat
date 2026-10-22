@@ -37,9 +37,7 @@ impl ModelRegistry {
         // 各架构统一处理：填充 tokenizer_repo 后转换为 HubInfo
         fn convert(map: &mut HashMap<String, HubInfoRaw>) -> HashMap<String, HubInfo> {
             ModelRegistry::fill_arch_tokenizer_repos(map);
-            map.drain()
-                .map(|(k, v)| (k, HubInfo::from(v)))
-                .collect()
+            map.drain().map(|(k, v)| (k, HubInfo::from(v))).collect()
         }
 
         let qwen3 = convert(&mut raw.qwen3);
@@ -47,14 +45,19 @@ impl ModelRegistry {
         let qwen3_moe = raw.qwen3_moe.as_mut().map(convert);
         let qwen3_5 = raw.qwen3_5.as_mut().map(convert);
 
-        Self { qwen3, qwen3_vl, qwen3_moe, qwen3_5 }
+        Self {
+            qwen3,
+            qwen3_vl,
+            qwen3_moe,
+            qwen3_5,
+        }
     }
 
     /// 为特定架构的模型填充 tokenizer_repo
     fn fill_arch_tokenizer_repos(models: &mut HashMap<String, HubInfoRaw>) {
         // 第一步：为 base 模型设置 tokenizer_repo
         let mut base_tokenizers = HashMap::new();
-        
+
         for (variant_name, hub_info) in models.iter_mut() {
             if variant_name.ends_with("_base") {
                 if hub_info.tokenizer_repo.is_none() {
@@ -77,7 +80,7 @@ impl ModelRegistry {
                 } else {
                     variant_name
                 };
-                
+
                 // 查找对应的 base 模型的 tokenizer_repo
                 if let Some(tokenizer_repo) = base_tokenizers.get(base_name) {
                     hub_info.tokenizer_repo = Some(tokenizer_repo.clone());

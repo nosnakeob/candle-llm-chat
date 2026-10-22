@@ -18,8 +18,8 @@
 //! 该格式在 system prompt 中告知模型，模型（特别是 Qwen3-instruct）对该格式有良好的指令遵循能力。
 
 mod file_read;
-mod registry;
 mod parse;
+mod registry;
 mod web_fetch;
 
 pub use file_read::FileReadTool;
@@ -42,7 +42,11 @@ pub struct ToolDef {
 }
 
 impl ToolDef {
-    pub fn new(name: impl Into<String>, description: impl Into<String>, parameters: serde_json::Value) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
         Self {
             name: name.into(),
             description: description.into(),

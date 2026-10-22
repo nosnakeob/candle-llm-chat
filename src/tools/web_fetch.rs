@@ -13,7 +13,7 @@
 //! - 响应内容上限为 20000 字符，超过时截断
 //! - 请求超时 15 秒
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use regex::Regex;
 
 use super::{Tool, ToolDef};

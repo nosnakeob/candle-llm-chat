@@ -1,9 +1,5 @@
-use anyhow::Result;
-use candle::quantized::gguf_file::Content;
-use derive_new::new;
 use serde::Deserialize;
 use strum::{Display, EnumString};
-use tokenizers::Tokenizer;
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -59,6 +55,7 @@ pub enum ModelArch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     #[test]
     fn test_hub_info_conversion() -> Result<()> {
