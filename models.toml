@@ -1,10 +1,14 @@
-# 模型配置文件 - 基于约定的简化配置
-# 约定:
-# - GGUF 模型仓库名包含 "GGUF" 或 "-GGUF"
-# - Safetensors 模型默认文件为 "model.safetensors"
-# - 分片模型自动检测 "model.safetensors.index.json"
-# - tokenizer_repo 未配置时自动使用对应的非 GGUF 仓库
-# - 系列.大小_变体
+# 模型配置文件
+#
+# 键名格式：<架构>.<变体>，例如 [qwen3.8b_q4] / [qwen3_vl.2b_base]
+# 用 "qwen3" 这种只给架构名的写法时，取该架构下 default = true 的条目。
+#
+# 字段：
+#   model_repo     HuggingFace 仓库
+#   model_file     权重文件名（默认 model.safetensors；GGUF 必填）
+#   tokenizer_repo tokenizer 所在仓库，省略时等于 model_repo。
+#                  只有 GGUF 量化仓库里没有 tokenizer 时才需要显式指定。
+#   default        只给架构名时是否选用此条目
 
 # ── Qwen3 系列 ──────────────────────────────────────────────────────────────
 # 架构: qwen3 / quantized_qwen3  (candle qwen3.rs)
@@ -17,6 +21,7 @@ model_repo = "Qwen/Qwen3-4B-Instruct-2507"
 [qwen3.4b_q4]
 model_repo = "byteshape/Qwen3-4B-Instruct-2507-GGUF"
 model_file = "Qwen3-4B-Instruct-2507-Q4_K_S-3.66bpw.gguf"
+tokenizer_repo = "Qwen/Qwen3-4B-Instruct-2507"
 
 [qwen3.4b_abliterated]
 model_repo = "Goekdeniz-Guelmez/Josiefied-Qwen3-4B-abliterated-v2"
@@ -28,6 +33,7 @@ model_repo = "Qwen/Qwen3-8B"
 [qwen3.8b_q4]
 model_repo = "Qwen/Qwen3-8B-GGUF"
 model_file = "Qwen3-8B-Q4_K_M.gguf"
+tokenizer_repo = "Qwen/Qwen3-8B"
 default = true
 
 [qwen3.14b_base]
@@ -36,6 +42,7 @@ model_repo = "Qwen/Qwen3-14B"
 [qwen3.14b_q4]
 model_repo = "Qwen/Qwen3-14B-GGUF"
 model_file = "Qwen3-14B-Q4_K_M.gguf"
+tokenizer_repo = "Qwen/Qwen3-14B"
 
 [qwen3.32b_base]
 model_repo = "Qwen/Qwen3-32B"
@@ -43,6 +50,7 @@ model_repo = "Qwen/Qwen3-32B"
 [qwen3.32b_q4]
 model_repo = "Qwen/Qwen3-32B-GGUF"
 model_file = "Qwen3-32B-Q4_K_M.gguf"
+tokenizer_repo = "Qwen/Qwen3-32B"
 
 # ── Qwen3-VL 系列 ───────────────────────────────────────────────────────────
 # 架构: Qwen3VL  (src/model/qwen3_vl.rs)

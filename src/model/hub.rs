@@ -40,7 +40,7 @@ impl From<HubInfoRaw> for HubInfo {
     }
 }
 
-#[derive(Debug, Clone, EnumString, Display)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, EnumString, Display)]
 #[strum(serialize_all = "lowercase")]
 pub enum ModelArch {
     Qwen3,
