@@ -102,7 +102,7 @@ impl Agent {
                 }
 
                 // 获取模型完整响应
-                let raw_response = self.pipe.chat_full()?;
+                let raw_response = self.pipe.chat_full().await?;
 
                 // 提取并执行工具调用
                 let tool_calls: Vec<_> = ToolCallParser::parse(&raw_response)?;

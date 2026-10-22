@@ -86,200 +86,46 @@ impl ChatPipeline {
         Self::with_default_config("qwen3").await
     }
 
-    /// 流式对话（纯文本，用于直接展示给用户）
+    /// 流式对话（纯文本）
     pub fn chat<'a>(&'a mut self, prompt: &'a str) -> impl Stream<Item = Result<String>> + 'a {
-        let mut answer = String::with_capacity(1024);
         self.ctx.push_msg(prompt);
-        self.model.clr_kv_cache();
-
-        try_stream!({
-            let prompt = self.ctx.render()?;
-            let mut ctx_tokens = self.str2tokens(&prompt)?;
-            if std::env::var_os("Q35_PERF").is_some() {
-                tracing::info!(
-                    "[q35-prefill] prompt_tokens={} msgs={}",
-                    ctx_tokens.len(),
-                    self.ctx.messages.len()
-                );
-            }
-
-            let start = std::time::Instant::now();
-            let ans_start_idx = ctx_tokens.len();
-
-            let mut decode_start: Option<std::time::Instant> = None;
-            let mut decoded = 0usize;
-            for index in 0..self.infer_conf.sample_len {
-                let t0 = std::time::Instant::now();
-                let next_token = if index == 0 {
-                    self.gen_next_token(&ctx_tokens, 0, None, None)?
-                } else {
-                    if decode_start.is_none() {
-                        decode_start = Some(std::time::Instant::now());
-                    }
-                    self.gen_next_token(
-                        &ctx_tokens,
-                        ans_start_idx + index - 1,
-                        Some(ans_start_idx),
-                        None,
-                    )?
-                };
-                let dt = t0.elapsed();
-                // 注意：这里只记录 CPU 侧提交耗时，不含 GPU 排队；打开后每 token 会多一次同步，
-                // 测到的脚本会整体变慢（这个开关本来就是诊断用的取样行为）。
-                if std::env::var_os("Q35_PERF").is_some() && index < 200 {
-                    tracing::info!("[q35-perf] idx={index} gen={dt:.1?} prompt={ans_start_idx}");
-                }
-                ctx_tokens.push(next_token);
-
-                if let Some(t) = self.tos.next_token(next_token)? {
-                    answer.push_str(&t);
-                    yield t;
-                }
-
-                if self.is_stop_token(next_token) {
-                    break;
-                }
-                decoded += 1;
-            }
-            if let Some(ds) = decode_start {
-                info!(
-                    "[q35-perf] decode total: {} tok in {:.1?} = {:.2} tok/s",
-                    decoded,
-                    ds.elapsed(),
-                    decoded as f64 / ds.elapsed().as_secs_f64()
-                );
-            }
-
-            if let Some(t) = self.tos.decode_rest()? {
-                answer.push_str(&t);
-                yield t;
-            }
-
-            self.ctx.push_msg(&answer);
-            self.tos.clear();
-
-            info!(
-                "speed: {:.2} token/s, total tokens: {}",
-                (ctx_tokens.len() - ans_start_idx) as f64 / start.elapsed().as_secs_f64(),
-                ctx_tokens.len()
-            );
-        })
+        self.decode(None)
     }
 
     /// 流式对话（多模态，支持图片）
+    ///
+    /// 预处理失败或模型不支持视觉时，返回一条说明文字而不是报错，
+    /// 保持流式接口的返回类型统一。
     pub fn chat_with_images<'a>(
         &'a mut self,
         prompt: &'a str,
         images: &'a [&'a str],
     ) -> Pin<Box<dyn Stream<Item = Result<String>> + 'a>> {
-        let vision_config = match self.model.vision_config() {
-            Some(vc) => vc.clone(),
-            None => {
-                return Box::pin(try_stream! {
-                    yield "[模型不支持视觉输入]".to_string();
-                });
+        match self.prepare_vision(prompt, images) {
+            Err(e) => Box::pin(try_stream! { yield format!("[图像预处理失败: {e}]"); }),
+            Ok(None) => Box::pin(try_stream! { yield "[模型不支持视觉输入]".to_string(); }),
+            Ok(Some((pixel_values, image_grid_thw, token_id, full_prompt))) => {
+                self.ctx.push_msg(&full_prompt);
+                Box::pin(self.decode(Some((pixel_values, image_grid_thw, token_id))))
             }
-        };
-
-        let preprocessed =
-            match qwen3_vl::preprocess_images(images, &vision_config, &self.infer_conf.device) {
-                Ok(pp) => pp,
-                Err(e) => {
-                    return Box::pin(try_stream! {
-                        yield format!("[图像预处理失败: {}]", e);
-                    });
-                }
-            };
-        let full_prompt = qwen3_vl::build_vision_prompt(prompt, preprocessed.num_placeholders);
-        self.ctx.push_msg(&full_prompt);
-
-        Box::pin(try_stream! {
-            let rendered = self.ctx.render()?;
-            let mut ctx_tokens = self.str2tokens(&rendered)?;
-            let span = qwen3_vl::find_image_token_span(&ctx_tokens, vision_config.image_token_id);
-            let vision = VisionInput {
-                pixel_values: preprocessed.pixel_values,
-                image_grid_thw: preprocessed.image_grid_thw,
-                image_token_span: span,
-            };
-
-            let mut answer = String::with_capacity(1024);
-            self.model.clr_kv_cache();
-
-            let start = std::time::Instant::now();
-            let ans_start_idx = ctx_tokens.len();
-
-            for index in 0..self.infer_conf.sample_len {
-                let v_ref = if index == 0 { Some(&vision) } else { None };
-                let next_token = if index == 0 {
-                    self.gen_next_token(&ctx_tokens, 0, None, v_ref)?
-                } else {
-                    self.gen_next_token(
-                        &ctx_tokens,
-                        ans_start_idx + index - 1,
-                        Some(ans_start_idx),
-                        None,
-                    )?
-                };
-                ctx_tokens.push(next_token);
-
-                if let Some(t) = self.tos.next_token(next_token)? {
-                    answer.push_str(&t);
-                    yield t;
-                }
-
-                if self.is_stop_token(next_token) {
-                    break;
-                }
-            }
-
-            if let Some(t) = self.tos.decode_rest()? {
-                answer.push_str(&t);
-                yield t;
-            }
-
-            self.ctx.push_msg(&answer);
-            self.tos.clear();
-
-            info!(
-                "speed: {:.2} token/s, total tokens: {}",
-                (ctx_tokens.len() - ans_start_idx) as f64 / start.elapsed().as_secs_f64(),
-                ctx_tokens.len()
-            );
-        })
+        }
     }
 
     /// 完整响应对话（用于 Agent tool calling 循环）
     ///
     /// 调用方负责将 user message 推入 context。
-    pub fn chat_full(&mut self) -> Result<String> {
-        let answer = self.generate_inner(None)?;
-        self.ctx.push_msg(&answer);
-        Ok(answer)
+    pub async fn chat_full(&mut self) -> Result<String> {
+        self.generate_inner(None).await
     }
 
     /// 完整响应对话（多模态，支持图片）
-    pub fn chat_full_with_images(&mut self, prompt: &str, images: &[&str]) -> Result<String> {
-        let vision_config = self
-            .model
-            .vision_config()
-            .ok_or_else(|| anyhow!("model does not support vision"))?
-            .clone();
-
-        let preprocessed =
-            qwen3_vl::preprocess_images(images, &vision_config, &self.infer_conf.device)?;
-        let full_prompt = qwen3_vl::build_vision_prompt(prompt, preprocessed.num_placeholders);
+    pub async fn chat_full_with_images(&mut self, prompt: &str, images: &[&str]) -> Result<String> {
+        let (pixel_values, image_grid_thw, token_id, full_prompt) = self
+            .prepare_vision(prompt, images)?
+            .ok_or_else(|| anyhow!("model does not support vision"))?;
         self.ctx.push_msg(&full_prompt);
-
-        let vision_data = (
-            preprocessed.pixel_values,
-            preprocessed.image_grid_thw,
-            vision_config.image_token_id,
-        );
-        let answer = self.generate_inner(Some(vision_data))?;
-
-        self.ctx.push_msg(&answer);
-        Ok(answer)
+        self.generate_inner(Some((pixel_values, image_grid_thw, token_id)))
+            .await
     }
 
     // ─── Agent 接口 ──────────────────────────────────────────────────────
@@ -311,65 +157,145 @@ impl ChatPipeline {
 
     // ─── 内部方法 ────────────────────────────────────────────────────────
 
-    /// 共享生成循环，vision_data 为 (pixel_values, image_grid_thw, image_token_id)
-    fn generate_inner(&mut self, vision_data: Option<(Tensor, Tensor, u32)>) -> Result<String> {
-        let mut answer = String::with_capacity(1024);
-        self.model.clr_kv_cache();
+    /// 图像预处理，返回 (pixel_values, image_grid_thw, image_token_id, 带占位符的 prompt)
+    ///
+    /// 模型不支持视觉时返回 Ok(None)。
+    fn prepare_vision(
+        &self,
+        prompt: &str,
+        images: &[&str],
+    ) -> Result<Option<(Tensor, Tensor, u32, String)>> {
+        let Some(vision_config) = self.model.vision_config() else {
+            return Ok(None);
+        };
+        let preprocessed =
+            qwen3_vl::preprocess_images(images, &vision_config, &self.infer_conf.device)?;
+        let full_prompt = qwen3_vl::build_vision_prompt(prompt, preprocessed.num_placeholders);
+        Ok(Some((
+            preprocessed.pixel_values,
+            preprocessed.image_grid_thw,
+            vision_config.image_token_id,
+            full_prompt,
+        )))
+    }
 
-        let prompt = self.ctx.render()?;
-        let mut ctx_tokens = self.str2tokens(&prompt)?;
+    /// 唯一的解码循环，流式产出文本块。
+    ///
+    /// `vision_data` 为 (pixel_values, image_grid_thw, image_token_id)，纯文本传 None。
+    /// 生成结束后把完整回答写回上下文并清理 token 流缓冲，两条路径（流式/非流式）
+    /// 行为因此完全一致。
+    fn decode<'a>(
+        &'a mut self,
+        vision_data: Option<(Tensor, Tensor, u32)>,
+    ) -> impl Stream<Item = Result<String>> + 'a {
+        try_stream! {
+            // 先清缓存再渲染 prompt：清缓存必须在编码之前，否则首 token 会带旧状态
+            self.model.clr_kv_cache();
 
-        let vision: Option<VisionInput> = vision_data.map(|(pv, gt, tok_id)| {
-            let span = qwen3_vl::find_image_token_span(&ctx_tokens, tok_id);
-            VisionInput {
-                pixel_values: pv,
-                image_grid_thw: gt,
-                image_token_span: span,
+            let rendered = self.ctx.render()?;
+            let mut ctx_tokens = self.str2tokens(&rendered)?;
+
+            let vision: Option<VisionInput> = vision_data.map(|(pixel_values, image_grid_thw, token_id)| {
+                VisionInput {
+                    pixel_values,
+                    image_grid_thw,
+                    image_token_span: qwen3_vl::find_image_token_span(&ctx_tokens, token_id),
+                }
+            });
+
+            if std::env::var_os("Q35_PERF").is_some() {
+                tracing::info!(
+                    "[q35-prefill] prompt_tokens={} msgs={}",
+                    ctx_tokens.len(),
+                    self.ctx.messages.len()
+                );
             }
-        });
 
-        let start = std::time::Instant::now();
-        let ans_start_idx = ctx_tokens.len();
+            let start = std::time::Instant::now();
+            let ans_start_idx = ctx_tokens.len();
+            let mut answer = String::with_capacity(1024);
+            let mut decoded = 0usize;
+            let mut decode_start: Option<std::time::Instant> = None;
 
-        for index in 0..self.infer_conf.sample_len {
-            let v_ref = if index == 0 { vision.as_ref() } else { None };
-            let next_token = if index == 0 {
-                self.gen_next_token(&ctx_tokens, 0, None, v_ref)?
-            } else {
-                self.gen_next_token(
-                    &ctx_tokens,
-                    ans_start_idx + index - 1,
-                    Some(ans_start_idx),
-                    None,
-                )?
-            };
-            ctx_tokens.push(next_token);
+            for index in 0..self.infer_conf.sample_len {
+                let t0 = std::time::Instant::now();
 
-            if let Some(t) = self.tos.next_token(next_token)? {
+                // 首个 token 走完整 prompt（可能含图像），之后每次只喂上一个 token
+                let (input_pos, vision_ref, penalty_from) = if index == 0 {
+                    (0, vision.as_ref(), None)
+                } else {
+                    if decode_start.is_none() {
+                        decode_start = Some(std::time::Instant::now());
+                    }
+                    (ans_start_idx + index - 1, None, Some(ans_start_idx))
+                };
+
+                let next_token = self.gen_next_token(&ctx_tokens, input_pos, penalty_from, vision_ref)?;
+
+                // 只记录 CPU 侧提交耗时，不含 GPU 排队；打开后每 token 多一次同步，仅用于诊断
+                if std::env::var_os("Q35_PERF").is_some() && index < 200 {
+                    tracing::info!(
+                        "[q35-perf] idx={index} gen={:?} prompt={ans_start_idx}",
+                        t0.elapsed()
+                    );
+                }
+
+                ctx_tokens.push(next_token);
+                decoded += 1;
+
+                if let Some(t) = self.tos.next_token(next_token)? {
+                    answer.push_str(&t);
+                    yield t;
+                }
+
+                if self.is_stop_token(next_token) {
+                    break;
+                }
+            }
+
+            if let Some(ds) = decode_start {
+                let secs = ds.elapsed().as_secs_f64();
+                if secs > 0.0 {
+                    info!(
+                        "[q35-perf] decode: {decoded} tok in {secs:.3}s = {:.2} tok/s",
+                        decoded as f64 / secs
+                    );
+                }
+            }
+
+            if let Some(t) = self.tos.decode_rest()? {
                 answer.push_str(&t);
+                yield t;
             }
 
-            if self.is_stop_token(next_token) {
-                break;
+            self.ctx.push_msg(&answer);
+            self.tos.clear();
+
+            let elapsed = start.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                info!(
+                    "speed: {:.2} token/s, total tokens: {}",
+                    (ctx_tokens.len() - ans_start_idx) as f64 / elapsed,
+                    ctx_tokens.len()
+                );
             }
         }
+    }
 
-        if let Some(t) = self.tos.decode_rest()? {
-            answer.push_str(&t);
+    /// 非流式入口：把 decode 跑到结束并收集完整回答
+    fn generate_inner(
+        &mut self,
+        vision_data: Option<(Tensor, Tensor, u32)>,
+    ) -> impl std::future::Future<Output = Result<String>> + '_ {
+        async move {
+            let stream = self.decode(vision_data);
+            let mut stream = std::pin::pin!(stream);
+            let mut answer = String::with_capacity(1024);
+            while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
+                answer.push_str(&chunk?);
+            }
+            Ok(answer)
         }
-
-        self.tos.clear();
-
-        let elapsed = start.elapsed().as_secs_f64();
-        if elapsed > 0.0 {
-            info!(
-                "speed: {:.2} token/s, total tokens: {}",
-                (ctx_tokens.len() - ans_start_idx) as f64 / elapsed,
-                ctx_tokens.len()
-            );
-        }
-
-        Ok(answer)
     }
 
     /// 判断是否命中停止 token（eos 或额外 stop tokens）
@@ -469,8 +395,8 @@ fn repeat_penalty_inplace(logits: &Tensor, penalty: f32, context: &[u32]) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_transformers::utils::apply_repeat_penalty;
     use anyhow::Result;
+    use candle_transformers::utils::apply_repeat_penalty;
     use futures_util::{StreamExt, pin_mut};
     use std::io;
     use std::io::Write;
@@ -502,7 +428,7 @@ mod tests {
 
         for prompt_str in prompts {
             pipe.push_user_message(prompt_str);
-            let answer = pipe.chat_full()?;
+            let answer = pipe.chat_full().await?;
             println!("{}", answer);
         }
 
