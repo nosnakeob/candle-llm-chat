@@ -25,8 +25,6 @@ const MAX_TOOL_ROUNDS: usize = 10;
 pub struct Agent {
     pipe: ChatPipeline,
     tools: ToolRegistry,
-    /// 工具调用系统的 system prompt 片段
-    tool_system_prompt: String,
 }
 
 impl Agent {
@@ -44,11 +42,9 @@ impl Agent {
 
     /// 指定模型和工具注册表
     pub async fn with_model_and_tools(model_id: &str, tools: ToolRegistry) -> Result<Self> {
-        let tool_system_prompt = tools.system_prompt_snippet();
         Ok(Self {
             pipe: ChatPipeline::with_default_config(model_id).await?,
             tools,
-            tool_system_prompt,
         })
     }
 
@@ -56,15 +52,12 @@ impl Agent {
     fn register_default_tools(&mut self) -> Result<()> {
         self.tools.register(FileReadTool::new())?;
         self.tools.register(WebFetchTool::new())?;
-        self.tool_system_prompt = self.tools.system_prompt_snippet();
         Ok(())
     }
 
     /// 注册自定义工具
     pub fn register_tool<T: crate::tools::Tool + 'static>(&mut self, tool: T) -> Result<()> {
-        self.tools.register(tool)?;
-        self.tool_system_prompt = self.tools.system_prompt_snippet();
-        Ok(())
+        self.tools.register(tool)
     }
 
     /// 对话入口（统一接口）
@@ -83,8 +76,9 @@ impl Agent {
         }
 
         Box::pin(try_stream! {
-            // 注入工具描述 system prompt（只注入一次）
-            self.pipe.inject_system_prompt(&self.tool_system_prompt)?;
+            // 注入工具描述 system prompt（每轮现算，避免缓存与注册表不一致）
+            let snippet = self.tools.system_prompt_snippet();
+            self.pipe.inject_system_prompt(&snippet)?;
             // 推送用户消息
             self.pipe.push_user_message(prompt);
 
