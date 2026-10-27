@@ -16,6 +16,32 @@ use tracing::info;
 
 use crate::model::qwen3_vl::{self, Qwen3VL};
 
+/// 最近一次生成的真实耗时数据
+///
+/// 流式接口吐的是**解码后的字符串片段**，不是 token —— 一个片段可能包含多个
+/// token，也可能只是一个多字节字符的一部分。用"收到几次 chunk"算 tok/s 会
+/// 得到明显偏低的假数字，所以速率必须由生成循环自己统计后交出来。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DecodeStats {
+    /// 生成的 token 数（不含 prefill）
+    pub tokens: usize,
+    /// 从开始到首 token 可以输出之间的耗时（prompt 编码 + 首 token）
+    pub prefill_secs: f64,
+    /// 首 token 之后逐 token 解码的耗时
+    pub decode_secs: f64,
+}
+
+impl DecodeStats {
+    /// 稳态 decode 速率（token/s）
+    pub fn tok_per_sec(&self) -> f64 {
+        if self.decode_secs > 0.0 {
+            self.tokens as f64 / self.decode_secs
+        } else {
+            0.0
+        }
+    }
+}
+
 pub struct ChatPipeline {
     model: Box<dyn ModelInference>,
     tos: TokenOutputStream,
@@ -26,6 +52,8 @@ pub struct ChatPipeline {
     /// 额外需要停止的 token id（如 <|im_end|>，Qwen3.5 config 的 eos 是 <|endoftext|>
     /// 但 chat 模板实际以 <|im_end|> 结尾）
     stop_tokens: Vec<u32>,
+    /// 最近一次生成的实测数据，供基准与诊断读取
+    last_stats: Option<DecodeStats>,
 }
 
 impl ChatPipeline {
@@ -75,6 +103,7 @@ impl ChatPipeline {
             infer_conf: config,
             eos_token_id,
             stop_tokens,
+            last_stats: None,
         })
     }
 
@@ -135,7 +164,15 @@ impl ChatPipeline {
     /// 对不支持清缓存的模型（Qwen3-MoE、Qwen3-VL）在已有上下文时会返回错误。
     pub fn clear_history(&mut self) -> Result<()> {
         self.ctx.clear_history();
+        self.last_stats = None;
         self.model.reset_kv_cache()
+    }
+
+    /// 最近一次生成的实测数据（token 数、prefill 与 decode 耗时）
+    ///
+    /// 供基准工具读取，避免调用方拿"收到几个字符串片段"当 token 数。
+    pub fn last_decode_stats(&self) -> Option<DecodeStats> {
+        self.last_stats
     }
 
     pub fn inject_system_prompt(&mut self, system_prompt: &str) -> Result<()> {
@@ -256,13 +293,20 @@ impl ChatPipeline {
             }
 
             if let Some(ds) = decode_start {
-                let secs = ds.elapsed().as_secs_f64();
-                if secs > 0.0 {
+                let stats = DecodeStats {
+                    tokens: decoded,
+                    prefill_secs: ds.duration_since(start).as_secs_f64(),
+                    decode_secs: ds.elapsed().as_secs_f64(),
+                };
+                if stats.decode_secs > 0.0 {
                     info!(
-                        "[q35-perf] decode: {decoded} tok in {secs:.3}s = {:.2} tok/s",
-                        decoded as f64 / secs
+                        "[q35-perf] decode: {} tok in {:.3}s = {:.2} tok/s",
+                        stats.tokens,
+                        stats.decode_secs,
+                        stats.tok_per_sec()
                     );
                 }
+                self.last_stats = Some(stats);
             }
 
             if let Some(t) = self.tos.decode_rest()? {

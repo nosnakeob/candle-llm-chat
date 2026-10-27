@@ -9,43 +9,37 @@
 //!
 //! 放在 examples/ 而不是 tests/：它不是断言型测试，是测量工具；
 //! 留在 tests/ 只会让 `cargo test` 多编译一份、再多一条恒被 #[ignore] 的条目。
+//!
+//! 速率取自 `ChatPipeline::last_decode_stats()` 而不是数流里的 chunk——
+//! 流吐的是解码后的字符串片段，一个片段可能含多个 token，按片段计数会把
+//! tok/s 算低一倍以上。
 use anyhow::Result;
 use candle_llm_chat::model::config::InferenceConfig;
-use candle_llm_chat::pipe::ChatPipeline;
+use candle_llm_chat::pipe::{ChatPipeline, DecodeStats};
 use futures_util::{StreamExt, pin_mut};
-use std::time::Instant;
 
 const PROMPT: &str = "请写一段不少于 300 字的说明文，介绍长江的地理特征与流域经济，不要分点。";
 const SAMPLE_LEN: usize = 256;
 
-/// 跑一轮固定长度解码，返回 (token 数, prefill 秒, 稳态 decode 秒)
-///
-/// 用"首 token 到达时刻"切分两段：之前是 prefill，之后是逐 token 解码。
-/// 把两段混在一起算平均速率是之前基准误导自己的原因。
-async fn run_once(pipe: &mut ChatPipeline) -> Result<(usize, f64, f64)> {
-    let start = Instant::now();
-    let stream = pipe.chat(PROMPT);
-    pin_mut!(stream);
-    let mut tokens = 0usize;
-    let mut first_at = None;
-    while let Some(t) = stream.next().await {
-        t?;
-        tokens += 1;
-        if first_at.is_none() {
-            first_at = Some(start.elapsed().as_secs_f64());
+/// 跑一轮固定长度解码，返回生成循环自己统计的实测数据
+async fn run_once(pipe: &mut ChatPipeline) -> Result<DecodeStats> {
+    // 流借用 pipe 到结束，用块限制作用域后才能读统计
+    {
+        let stream = pipe.chat(PROMPT);
+        pin_mut!(stream);
+        while let Some(t) = stream.next().await {
+            t?;
         }
     }
-    let total = start.elapsed().as_secs_f64();
-    let prefill = first_at.unwrap_or(total);
-    Ok((tokens, prefill, total - prefill))
+    pipe.last_decode_stats()
+        .ok_or_else(|| anyhow::anyhow!("生成未产生统计信息"))
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing::Level::WARN)
         .try_init();
-    // 预热用的短长度：避免把模型加载时间算进基准
     let conf = InferenceConfig {
         sample_len: SAMPLE_LEN,
         ..Default::default()
@@ -56,23 +50,29 @@ async fn main() -> Result<()> {
     let mut pipe = ChatPipeline::new(&model_id, conf).await?;
 
     // 预热一次（首轮包含 CUDA 上下文初始化与 kernel 编译）
-    let _ = run_once(&mut pipe).await?;
+    let warm = run_once(&mut pipe).await?;
+    println!(
+        "warmup: {} tok | prefill {:.3}s | decode {:.2}s = {:.2} tok/s",
+        warm.tokens,
+        warm.prefill_secs,
+        warm.decode_secs,
+        warm.tok_per_sec()
+    );
 
     let mut rates = Vec::new();
     for round in 0..3 {
         // 每轮清空历史：否则上一轮的长回答会留在 prompt 里，长度逐轮翻倍，
         // 测到的是"上下文越来越长"，而不是稳定的 decode 速率。
         pipe.clear_history()?;
-        let (tokens, prefill, decode) = run_once(&mut pipe).await?;
-        let rate = if decode > 0.0 {
-            tokens as f64 / decode
-        } else {
-            0.0
-        };
+        let s = run_once(&mut pipe).await?;
         println!(
-            "round {round}: {tokens} tok | prefill {prefill:.3}s | decode {decode:.2}s = {rate:.2} tok/s"
+            "round {round}: {} tok | prefill {:.3}s | decode {:.2}s = {:.2} tok/s",
+            s.tokens,
+            s.prefill_secs,
+            s.decode_secs,
+            s.tok_per_sec()
         );
-        rates.push(rate);
+        rates.push(s.tok_per_sec());
     }
     rates.sort_by(|a, b| a.partial_cmp(b).unwrap());
     println!("median decode = {:.2} tok/s", rates[rates.len() / 2]);
