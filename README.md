@@ -96,7 +96,7 @@ while let Some(Ok(token)) = stream.next().await {
 
 ```
 User prompt → Agent::chat()
-  → pipe.inject_system_prompt(tool_descriptions)   # 仅一次
+  → pipe.inject_system_prompt(tool_descriptions)   # 每次 chat() 现算，避免与注册表脱节
   → pipe.push_user_message(prompt)
   → pipe.chat_full()                                # 模型生成
   → ToolCallParser::parse(raw_response)
@@ -130,12 +130,16 @@ src/
 ├── lib.rs              # 库入口
 ├── pipe.rs             # ChatPipeline — 推理主管线（流式 + 完整响应）
 ├── agent.rs            # Agent — 工具调用循环，最大 10 轮
-├── qwen3_vl.rs         # Qwen3-VL 多模态独立管线
 ├── model/
 │   ├── mod.rs          # ModelInference trait + impl_model_traits! 宏
 │   ├── config.rs       # ModelLoader — GGUF / Safetensors 自动分发
 │   ├── registry.rs     # ModelRegistry — models.toml 解析
-│   └── hub.rs          # HubInfo, ModelArch 类型定义
+│   ├── hub.rs          # HubInfo, ModelArch 类型定义
+│   ├── qwen3_vl.rs     # Qwen3-VL 多模态独立管线
+│   └── qwen3_5/        # Qwen3.5 混合线性注意力（candle 尚未支持，自实现）
+│       ├── dense.rs    #   Safetensors 版
+│       ├── quantized.rs#   GGUF 量化版（解码快路径 + conv1d 融合）
+│       └── chunked_scan.rs # Gated DeltaNet 分块并行扫描（可选 prefill 加速）
 ├── tools/
 │   ├── mod.rs          # Tool trait + ToolDef
 │   ├── parse.rs        # ToolCallParser — 正则 + 裸 JSON 回退
@@ -144,8 +148,17 @@ src/
 │   └── web_fetch.rs    # WebFetchTool — HTML → Markdown
 └── utils/
     ├── chat.rs         # ChatContext — MiniJinja 模板渲染
+    ├── hf.rs           # HFClient 单例，支持 HF_ENDPOINT 镜像
     ├── load.rs         # 模型/Tokenizer 下载，分片合并
     └── env_guard.rs    # ProxyGuard / HfEndpointGuard RAII
+
+examples/
+├── chat.rs             # 最简对话
+├── agent.rs            # 工具调用 Agent
+├── vision.rs           # 多模态图文对话
+├── bench_qwen3_5.rs    # 固定长度 decode 基准（可比的 tok/s）
+├── bench_env.rs        # GPU 时钟 / 测量噪声探针
+└── bench_conv1d.rs     # conv1d vs 同尺寸 matmul 对照
 ```
 
 ---
@@ -234,6 +247,11 @@ let _proxy = ProxyGuard::new(7897);  // Drop 时自动恢复
 - **网页抓取工具**：HTML → Markdown 提取
 - **Qwen3-VL 文本推理**：`Qwen3VL::chat()` 纯文本路径已通
 - **网络工具**：`ProxyGuard` / `HfEndpointGuard` RAII 模式
+- **Qwen3.5 混合线性注意力**：candle 0.11 及上游 main 均未支持，本项目自实现
+  （Gated DeltaNet + Gated Attention），GGUF 量化版与 Safetensors 版均可推理，
+  多轮对话已由 `tests/qwen3_5_e2e.rs` 验证
+- **可运行入口**：`examples/` 下的 `chat` / `agent` / `vision` / 三个 `bench_*`
+- **HF 镜像**：设置 `HF_ENDPOINT=https://hf-mirror.com` 即可从国内拉模型
 
 ### 🚧 部分实现
 
@@ -242,8 +260,8 @@ let _proxy = ProxyGuard::new(7897);  // Drop 时自动恢复
 
 ### ⏳ 待验证（需模型文件 + GPU）
 
-- 跑通第一个模型（4B GGUF 量化版）
-- Agent 端到端验证（集成测试已写，`#[ignore]`）
+- **Agent 工具调用端到端**：代码路径完整（`examples/agent.rs` 可编译），
+  但真机跑通与否未验证；集成测试 `test_read_eml_with_tools` 已写，`#[ignore]`
 
 ---
 
@@ -261,6 +279,28 @@ cargo test -- --nocapture
 ```
 
 所有单元测试都不需要模型文件、GPU 或网络。集成测试有 `#[ignore]` 标记，安全隔离。
+
+---
+
+## 基准测量
+
+性能相关的脚本放在 `examples/` 而不是 `tests/`：它们是测量工具，没有断言，
+留着会让 `cargo test` 顺带跑一遍 GPU 基准。
+
+```bash
+# 固定长度 decode 基准（3 轮取中位，分开报 prefill 与稳态 decode）
+cargo run --release --example bench_qwen3_5
+BENCH_MODEL=qwen3.0_8b_q4 cargo run --release --example bench_qwen3_5
+
+# 测量环境探针：GPU 时钟/利用率 + 各算子的中位数与离散比
+cargo run --release --example bench_env
+
+# conv1d 三种输入形态 vs 同尺寸 matmul
+cargo run --release --example bench_conv1d
+```
+
+> 本机 GPU 时钟随负载在 772MHz~3060MHz 间浮动，同一段代码相隔几分钟重测可差一个量级。
+> 报任何"优化了 N 倍"之前先用 `bench_env` 确认当时的时钟与离散度，否则数字是噪声。
 
 ---
 
