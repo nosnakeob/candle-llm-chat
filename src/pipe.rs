@@ -5,7 +5,7 @@ use crate::model::registry::ModelRegistry;
 use crate::utils::chat::ChatContext;
 use anyhow::{Error, Result};
 use async_stream::try_stream;
-use candle::{DType, Tensor};
+use candle::{D, DType, Tensor};
 use candle_examples::token_output_stream::TokenOutputStream;
 use candle_transformers::generation::LogitsProcessor;
 use futures_core::stream::Stream;
@@ -54,6 +54,12 @@ pub struct ChatPipeline {
     stop_tokens: Vec<u32>,
     /// 最近一次生成的实测数据，供基准与诊断读取
     last_stats: Option<DecodeStats>,
+    /// 最近一次 decode 的耗时拆分：(CPU 提交, 重复惩罚, 采样)，单位秒，累计值
+    ///
+    /// 这两段的比例决定优化方向：提交占大头说明是 launch-bound（该上 CUDA Graph），
+    /// 等待占大头说明真在算（该融合算子或提算术强度）。没有这个拆分，
+    /// 只能靠 nsys trace，而 nsys 在本机时而抓不到 CUDA 数据。
+    last_split: Option<(f64, f64, f64)>,
 }
 
 impl ChatPipeline {
@@ -104,6 +110,7 @@ impl ChatPipeline {
             eos_token_id,
             stop_tokens,
             last_stats: None,
+            last_split: None,
         })
     }
 
@@ -251,6 +258,7 @@ impl ChatPipeline {
             }
 
             let start = std::time::Instant::now();
+            self.last_split = None; // 每轮重新累计
             let ans_start_idx = ctx_tokens.len();
             let mut answer = String::with_capacity(1024);
             let mut decoded = 0usize;
@@ -370,8 +378,11 @@ impl ChatPipeline {
             None => ctx_tokens,
         };
 
+        let greedy = self.infer_conf.temperature <= 1e-9;
+        let t0 = std::time::Instant::now();
         let input = Tensor::new(input_arr, &self.infer_conf.device)?.unsqueeze(0)?;
         let mut logits = self.model.forward(&input, idx_pos, vision)?;
+        let t_forward = std::time::Instant::now();
         // 展平 leading 维度（GGUF 返回 (1, 1, vocab_size)，sample 需要 (vocab_size,)）
         while logits.rank() > 1 && logits.dim(0)? == 1 {
             logits = logits.squeeze(0)?;
@@ -391,7 +402,34 @@ impl ChatPipeline {
             }
         }
 
-        self.logits_processor.sample(&logits).map_err(Error::msg)
+        let t_penalty = std::time::Instant::now();
+
+        // 贪心路径：设备端 argmax，只回读 4 个字节。
+        // 采样路径仍留在 host（精确 top_p 要排序，candle 0.11 没有 device sort）。
+        // 实测两条路径同场对比 22.38 vs 22.31 tok/s —— 248k 词表的整表回读
+        // 只值一两个百分点，不是瓶颈；留着 argmax 是因为它免费且免了 1MB 拷贝。
+        let token = if greedy {
+            // argmax(dim=-1) 不保留维度，rank 0 直接取标量
+            logits.argmax(D::Minus1)?.to_scalar::<u32>()?
+        } else {
+            self.logits_processor.sample(&logits).map_err(Error::msg)?
+        };
+        let t_end = std::time::Instant::now();
+
+        let (mut submit, mut penalty, mut sample) = self.last_split.unwrap_or_default();
+        submit += t_forward.duration_since(t0).as_secs_f64();
+        penalty += t_penalty.duration_since(t_forward).as_secs_f64();
+        sample += t_end.duration_since(t_penalty).as_secs_f64();
+        self.last_split = Some((submit, penalty, sample));
+
+        Ok(token)
+    }
+
+    /// 最近一轮 decode 的耗时拆分（秒）：(CPU 提交 forward, 重复惩罚, 采样/回读)
+    ///
+    /// 提交远大于后两段 = launch-bound，CUDA Graph 才有意义；否则该往算子内部走。
+    pub fn last_split(&self) -> Option<(f64, f64, f64)> {
+        self.last_split
     }
 }
 
