@@ -1,5 +1,6 @@
 pub mod chunked_scan;
 pub mod dense;
+pub mod kv_buffer;
 pub mod quantized;
 
 pub use dense::{Config, Config as Qwen3_5Config, ModelForCausalLM};
