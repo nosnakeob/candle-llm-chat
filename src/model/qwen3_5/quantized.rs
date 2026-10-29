@@ -16,6 +16,7 @@ use std::io::{Read, Seek};
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::graph::DecodeGraph;
 use super::kv_buffer::FixedKvCache;
 
 pub struct Gguf<R: Read + Seek> {
@@ -121,6 +122,60 @@ impl RotaryEmbedding {
         let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
         Ok((q_embed, k_embed))
     }
+
+    /// 图内用：位置由 **device** 张量给出（host offset 会被烘进图，replay 永远取同一段）。
+    pub fn apply_dev(&self, q: &Tensor, k: &Tensor, pos_t: &Tensor) -> Result<(Tensor, Tensor)> {
+        let (_, _, seq_len, _) = q.dims4()?;
+        let offsets = Tensor::arange(0u32, seq_len as u32, pos_t.device())?;
+        let idx = pos_t.to_dtype(DType::U32)?.reshape(())?.broadcast_add(&offsets)?;
+        let cos = self.cos.index_select(&idx, 0)?.to_dtype(q.dtype())?;
+        let sin = self.sin.index_select(&idx, 0)?.to_dtype(q.dtype())?;
+        let q_embed = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
+        let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
+        Ok((q_embed, k_embed))
+    }
+}
+
+/// 一次前向的逐步上下文。
+///
+/// eager 与图内共用同一条前向代码，差别只有三处，全部收在这里：
+/// - 位置从哪来：`offset`（host）还是 `pos_t`（device）
+/// - KV 读多少：读到 `offset+len`（eager，形状可变）还是读整段 `cap`（图内，形状恒定）
+/// - 因果掩码：prefill 用 host 构造的 `causal_mask`，图内 decode 用 device 条件构造的 `mask`
+struct StepCtx<'a> {
+    offset: usize,
+    pos_t: &'a Tensor,
+    kv_ids: &'a Tensor,
+    mask: Option<&'a Tensor>,
+    cap: Option<usize>,
+}
+
+/// 图内 decode 的因果掩码：位置 i 可读当且仅当 `i <= pos`。
+///
+/// 整段缓冲下 attention 会算到 cap 列，靠这个掩码把 pos 之后的位置压成 -inf。
+/// 完全由 device 张量构造，捕获一次即可复用。
+fn decode_mask(
+    pos_t: &Tensor,
+    cap: usize,
+    dtype: DType,
+    consts: Option<&GraphConsts>,
+) -> Result<Tensor> {
+    let dev = pos_t.device();
+    // 走图时全部用捕获前建好的常量：图内不能出现 Tensor::arange / Tensor::full，
+    // 它们是「CPU 建再 H2D」，H2D 节点指向的 host 缓冲在捕获结束时已释放。
+    let (idx, neg, zero) = match consts {
+        Some(c) => (c.mask_idx.clone(), c.mask_neg.clone(), c.mask_zero.clone()),
+        None => (
+            Tensor::arange(0u32, cap as u32, dev)?,
+            Tensor::full(f32::NEG_INFINITY, (1, 1, 1, cap), dev)?.to_dtype(dtype)?,
+            Tensor::zeros((1, 1, 1, cap), dtype, dev)?,
+        ),
+    };
+    // candle 的比较算子不做广播（broadcast_le 不存在），把 pos 显式展成 [cap] 再比
+    let pos = pos_t.to_dtype(DType::U32)?.reshape(())?.broadcast_as(cap)?;
+    let keep = idx.le(&pos)?;
+    let keep = keep.reshape((1, 1, 1, cap))?;
+    Tensor::where_cond(&keep, &zero, &neg)
 }
 
 /// KV 存储的两种实现，用 `Q35_CONCAT_KV=1` 切换（默认固定缓冲）。
@@ -148,6 +203,85 @@ impl KvStore {
             KvStore::Concat(c) => c.reset(),
         }
     }
+}
+
+/// 捕获期失败定位：记录最后进入的阶段名。
+///
+/// 只有 Q35_STAGE=1 时才真的写字符串（默认零开销），失败时由 stage_err 打印出来。
+/// thread_local 是因为同一个进程里可能有多个模型/线程各跑各的前向。
+mod stage {
+    use std::cell::RefCell;
+    thread_local! {
+        static CUR: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+    pub(super) fn enabled() -> bool {
+        static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| std::env::var("Q35_STAGE").is_ok_and(|v| v == "1"))
+    }
+    pub(super) fn set(args: std::fmt::Arguments<'_>) {
+        if enabled() {
+            CUR.with(|c| *c.borrow_mut() = args.to_string());
+        }
+    }
+    pub(super) fn get() -> String {
+        CUR.with(|c| c.borrow().clone())
+    }
+}
+
+/// 标记当前阶段（各算子组入口各调一次）
+fn mark_stage(args: std::fmt::Arguments<'_>) {
+    stage::set(args)
+}
+
+/// 给错误补上「最后进入的阶段」——捕获失败时唯一能定位到算子群的信息
+fn stage_err(e: candle::Error) -> candle::Error {
+    candle::Error::Msg(format!("[stage={}] {e}", stage::get()))
+}
+
+/// 标记当前阶段：stage!("attn.rope")  `Q35_STAGE=1` 时才有开销
+macro_rules! stage {
+    ($($arg:tt)*) => { mark_stage(format_args!($($arg)*)) };
+}
+
+/// 诊断开关：跑到指定阶段就返回零张量（二分定位图内非法访问的算子）
+fn graph_stop() -> Option<String> {
+    static CACHED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHED.get_or_init(|| std::env::var("Q35_GRAPH_STOP").ok()).clone()
+}
+
+fn stop_hit(name: &str) -> bool {
+    graph_stop().as_deref() == Some(name)
+}
+
+/// 诊断开关：只跑前 n 层（二分定位图内非法访问）
+fn graph_layer_limit() -> Option<usize> {
+    static CACHED: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("Q35_GRAPH_LAYERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    })
+}
+
+/// 诊断开关：捕获后不恢复 GDN 状态（验证「捕获区内的状态张量被释放」是否是非法访问的根因）
+fn no_restore() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| std::env::var("Q35_GRAPH_NO_RESTORE").is_ok_and(|v| v == "1"))
+}
+
+pub fn graph_enabled() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| std::env::var("Q35_CUDA_GRAPH").is_ok_and(|v| v == "1"))
+}
+
+fn graph_check_enabled() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| std::env::var("Q35_GRAPH_CHECK").is_ok_and(|v| v == "1"))
+}
+
+pub fn bucket_check_enabled() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| std::env::var("Q35_BUCKET_CHECK").is_ok_and(|v| v == "1"))
 }
 
 fn use_concat_kv() -> bool {
@@ -223,15 +357,10 @@ impl AttentionWeights {
         })
     }
 
-    fn forward(
-        &mut self,
-        x: &Tensor,
-        attn_mask: Option<&Tensor>,
-        offset: usize,
-        kv_ids: &Tensor,
-    ) -> Result<Tensor> {
+    fn forward(&mut self, x: &Tensor, ctx: &StepCtx) -> Result<Tensor> {
         let (b, l, _) = x.dims3()?;
 
+        stage!("attn.qkv_proj");
         let q_out = self.q_proj.forward(x)?;
         let q_out = q_out.reshape((b, l, self.num_heads, self.head_dim * 2))?;
 
@@ -248,6 +377,7 @@ impl AttentionWeights {
             .reshape((b, l, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;
 
+        stage!("attn.qk_norm");
         let q_flat = q.flatten(0, 2)?;
         let k_flat = k.flatten(0, 2)?;
 
@@ -256,10 +386,16 @@ impl AttentionWeights {
         let q = q_flat.reshape((b, self.num_heads, l, self.head_dim))?;
         let k = k_flat.reshape((b, self.num_kv_heads, l, self.head_dim))?;
 
-        let (q, k) = self.rotary_emb.apply(&q, &k, offset)?;
+        stage!("attn.rope");
+        let (q, k) = if ctx.cap.is_some() {
+            self.rotary_emb.apply_dev(&q, &k, ctx.pos_t)?
+        } else {
+            self.rotary_emb.apply(&q, &k, ctx.offset)?
+        };
 
         let (k, v) = match &mut self.kv_cache {
             KvStore::Fixed(cache) => {
+                stage!("attn.kv_write");
                 // 索引 kv_ids 由 ModelWeights 每步构造一次（含 device 位置），此处只做写。
                 // decode(l==1) 走 reshape：转置+合并+连续化是三次算子，reshape 是零拷贝视图。
                 let (k_row, v_row) = if l == 1 {
@@ -275,8 +411,19 @@ impl AttentionWeights {
                         v.transpose(1, 2)?.squeeze(0)?.contiguous()?,
                     )
                 };
-                cache.write_indexed(kv_ids, &k_row, &v_row)?;
-                let (k, v) = cache.narrow(offset + l)?;
+                cache.write_indexed(ctx.kv_ids, &k_row, &v_row)?;
+                // 图内读整段（形状恒定），eager 只读到已写位置。
+                stage!("attn.kv_read");
+                let (k, v) = match ctx.cap {
+                    Some(cap) => {
+                        let (kf, vf) = cache.full();
+                        if cap != cache.max_seq() {
+                            candle::bail!("图内读整段要求 cap == 容量，cap={cap}")
+                        }
+                        (kf.clone(), vf.clone())
+                    }
+                    None => cache.narrow(ctx.offset + l)?,
+                };
                 (
                     k.unsqueeze(0)?.transpose(1, 2)?.contiguous()?, // [1, kv_head, len, d]
                     v.unsqueeze(0)?.transpose(1, 2)?.contiguous()?,
@@ -285,12 +432,13 @@ impl AttentionWeights {
             KvStore::Concat(cache) => cache.append(&k, &v)?, // 已是 [1, kv_head, len, d]
         };
 
+        stage!("attn.repeat_kv");
         let k = repeat_kv(k, self.num_kv_groups)?.contiguous()?;
         let v = repeat_kv(v, self.num_kv_groups)?.contiguous()?;
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let mut scores = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
-        if let Some(m) = attn_mask {
+        if let Some(m) = ctx.mask {
             let m_dtype = m.dtype();
             let scores_dtype = scores.dtype();
             let mask = if m_dtype != scores_dtype {
@@ -344,6 +492,9 @@ struct GatedDeltaNetWeights {
 
     conv_state: Option<Tensor>,
     recurrent_state: Option<Tensor>,
+    /// 持久显存：走图前一次性分配，图内原地更新（见 StateBuf）
+    conv_storage: Option<StateBuf>,
+    rec_storage: Option<StateBuf>,
 }
 
 impl GatedDeltaNetWeights {
@@ -409,6 +560,8 @@ impl GatedDeltaNetWeights {
             norm_eps: rms_norm_eps,
             conv_state: None,
             recurrent_state: None,
+            conv_storage: None,
+            rec_storage: None,
         })
     }
 
@@ -421,12 +574,17 @@ impl GatedDeltaNetWeights {
 
     fn rms_norm_gated(&self, x: &Tensor, g: &Tensor) -> Result<Tensor> {
         let x_dtype = x.dtype();
+        stage!("gdn.norm.to_f32");
         let x_f32 = x.to_dtype(DType::F32)?;
         let g_f32 = g.to_dtype(DType::F32)?;
 
+        stage!("gdn.norm.silu");
         let gate = g_f32.silu()?;
+        stage!("gdn.norm.rms");
         let norm_x = (x_f32.sqr()?.mean_keepdim(D::Minus1)? + self.norm_eps)?.sqrt()?;
+        stage!("gdn.norm.div");
         let x_normed = x_f32.broadcast_div(&norm_x)?;
+        stage!("gdn.norm.mul");
         (x_normed * gate)?
             .broadcast_mul(&self.norm_weight.to_dtype(DType::F32)?)?
             .to_dtype(x_dtype)
@@ -573,11 +731,29 @@ impl GatedDeltaNetWeights {
         Ok((core_attn_out, last_recurrent_state))
     }
 
+    /// 走图前分配持久状态显存。形状取 decode 步的定值（batch=1、seq=1）：
+    /// prefill 与 decode 写回的状态元素数相同，共用一块缓冲即可。
+    fn prepare_state_storage(&mut self, batch: usize, act_dtype: DType, dev: &Device) -> Result<()> {
+        let pad = self.conv_kernel_size - 1;
+        self.conv_storage = Some(StateBuf::zeros(&[batch, self.conv_dim, pad], act_dtype, dev)?);
+        // 递推状态在 delta rule 内部一律走 F32
+        self.rec_storage = Some(StateBuf::zeros(
+            &[batch, self.num_v_heads, self.head_v_dim, self.head_k_dim],
+            DType::F32,
+            dev,
+        )?);
+        Ok(())
+    }
+
     fn forward(&mut self, hidden_states: &Tensor) -> Result<Tensor> {
         let (batch_size, seq_len, _) = hidden_states.dims3()?;
         let initial_dtype = hidden_states.dtype();
 
+        stage!("gdn.in_proj");
         let mixed_qkv = self.in_proj_qkv.forward(hidden_states)?.transpose(1, 2)?;
+        if stop_hit("gdn.in_proj") {
+            return Tensor::zeros_like(hidden_states);
+        }
 
         let z = self.in_proj_z.forward(hidden_states)?;
         let z = z.reshape((batch_size, seq_len, (), self.head_v_dim))?;
@@ -587,11 +763,14 @@ impl GatedDeltaNetWeights {
 
         let use_precomputed_states = self.conv_state.is_some() && seq_len == 1;
 
+        stage!("gdn.conv");
         let t_conv = Instant::now();
         let mixed_qkv = if use_precomputed_states {
-            let conv_state = self.conv_state.as_mut().unwrap();
-            let conv_state_data = Tensor::cat(&[conv_state.as_ref(), &mixed_qkv], 2)?;
-            *conv_state = conv_state_data.narrow(2, 1, self.conv_kernel_size - 1)?;
+            let conv_state = self.conv_state.clone().unwrap();
+            let conv_state_data = Tensor::cat(&[&conv_state, &mixed_qkv], 2)?;
+            let next = conv_state_data.narrow(2, 1, self.conv_kernel_size - 1)?;
+            // 图内不能"算完换张量"：换了就等于把状态丢在已被回收的显存里
+            store_state(self.conv_storage.as_ref(), &mut self.conv_state, &next)?;
             let out = depthwise_conv1d(&conv_state_data, &self.conv1d_weight, 0)?;
             candle_nn::ops::silu(&out)?
         } else {
@@ -602,12 +781,16 @@ impl GatedDeltaNetWeights {
                 mixed_qkv.device(),
             )?;
             let padded_qkv = Tensor::cat(&[&padding, &mixed_qkv], 2)?;
-            self.conv_state = Some(padded_qkv.narrow(2, seq_len, pad)?);
+            let next = padded_qkv.narrow(2, seq_len, pad)?;
+            store_state(self.conv_storage.as_ref(), &mut self.conv_state, &next)?;
             let out = depthwise_conv1d(&padded_qkv, &self.conv1d_weight, 0)?;
             candle_nn::ops::silu(&out)?
         };
 
         let dt_conv = t_conv.elapsed();
+        if stop_hit("gdn.conv") {
+            return Tensor::zeros_like(hidden_states);
+        }
         let mixed_qkv = mixed_qkv.transpose(1, 2)?;
 
         let q = mixed_qkv.narrow(D::Minus1, 0, self.key_dim)?;
@@ -618,6 +801,7 @@ impl GatedDeltaNetWeights {
         let k = k.reshape((batch_size, seq_len, (), self.head_k_dim))?;
         let v = v.reshape((batch_size, seq_len, (), self.head_v_dim))?;
 
+        stage!("gdn.gate");
         let beta = candle_nn::ops::sigmoid(&b)?;
         let g = {
             let a_f32 = a.to_dtype(DType::F32)?;
@@ -630,27 +814,46 @@ impl GatedDeltaNetWeights {
         let q = repeat_interleave(&q, repeat_n, 2)?;
         let k = repeat_interleave(&k, repeat_n, 2)?;
 
+        // 先 clone 出句柄再交给递推：写回时要用 &mut self.recurrent_state
         let initial_state = if use_precomputed_states {
-            self.recurrent_state.as_ref()
+            self.recurrent_state.clone()
         } else {
             None
         };
 
+        if stop_hit("gdn.gate") {
+            return Tensor::zeros_like(hidden_states);
+        }
+
+        stage!("gdn.delta_rule");
         let t_dr = Instant::now();
         let (core_attn_out, new_state) =
-            self.torch_recurrent_gated_delta_rule(&q, &k, &v, &g, &beta, initial_state)?;
+            self.torch_recurrent_gated_delta_rule(&q, &k, &v, &g, &beta, initial_state.as_ref())?;
         let dt_dr = t_dr.elapsed();
-        self.recurrent_state = Some(new_state);
+        store_state(
+            self.rec_storage.as_ref(),
+            &mut self.recurrent_state,
+            &new_state,
+        )?;
 
+        if stop_hit("gdn.delta_rule") {
+            return Tensor::zeros_like(hidden_states);
+        }
         let core_attn_out = core_attn_out.to_dtype(initial_dtype)?;
         let core_attn_out =
             core_attn_out.reshape((batch_size, seq_len, self.num_v_heads, self.head_v_dim))?;
         let core_attn_out = core_attn_out.reshape(((), self.head_v_dim))?;
         let z_flat = z.reshape(((), self.head_v_dim))?;
+        stage!("gdn.norm");
         let core_attn_out = self.rms_norm_gated(&core_attn_out, &z_flat)?;
+        if stop_hit("gdn.norm") {
+            return Tensor::zeros_like(hidden_states);
+        }
+        stage!("gdn.reshape_out");
         let core_attn_out =
             core_attn_out.reshape((batch_size, seq_len, self.num_v_heads * self.head_v_dim))?;
 
+        stage!("gdn.out_proj");
         let out = self.out_proj.forward(&core_attn_out);
         // 每 token 查一次 env 在热路径上不便宜，用进程级缓存
         if seq_len <= 2 && perf_enabled() {
@@ -812,20 +1015,19 @@ impl LayerWeights {
     fn forward(
         &mut self,
         x: &Tensor,
-        mask: Option<&Tensor>,
-        offset: usize,
-        kv_ids: &Tensor,
+        ctx: &StepCtx,
         layer_kind: &mut &'static str,
         t_mixer: Option<&mut std::time::Duration>,
         _t_mlp: Option<&mut std::time::Duration>,
     ) -> Result<Tensor> {
         let residual = x;
+        stage!("layer.input_norm");
         let x = self.input_layernorm.forward(x)?;
         let t0 = std::time::Instant::now();
         let x = match &mut self.token_mixer {
             TokenMixer::FullAttention(attn) => {
                 *layer_kind = "full";
-                attn.forward(&x, mask, offset, kv_ids)?
+                attn.forward(&x, ctx)?
             }
             TokenMixer::LinearAttention(attn) => {
                 *layer_kind = "gdn";
@@ -835,10 +1037,13 @@ impl LayerWeights {
         if let Some(d) = t_mixer {
             *d += t0.elapsed();
         }
+        stage!("layer.residual1");
         let x = (residual + x)?;
 
         let residual = &x;
+        stage!("layer.post_norm");
         let x = self.post_attention_layernorm.forward(&x)?;
+        stage!("layer.mlp");
         let x = x.apply(&self.mlp)?;
         x + residual
     }
@@ -850,12 +1055,157 @@ impl LayerWeights {
         }
     }
 
+    /// 快照必须是深拷贝：状态现在写在持久缓冲里，clone 只共享存储，
+    /// 后续原地更新会把快照一起改掉。
+    fn states(&self) -> Result<(Option<Tensor>, Option<Tensor>)> {
+        match &self.token_mixer {
+            TokenMixer::LinearAttention(a) => {
+                let conv = a.conv_state.as_ref().map(|t| t.copy()).transpose()?;
+                let rec = a.recurrent_state.as_ref().map(|t| t.copy()).transpose()?;
+                Ok((conv, rec))
+            }
+            TokenMixer::FullAttention(_) => Ok((None, None)),
+        }
+    }
+
+    fn set_states(&mut self, s: &(Option<Tensor>, Option<Tensor>)) -> Result<()> {
+        if let TokenMixer::LinearAttention(a) = &mut self.token_mixer {
+            match &s.0 {
+                Some(t) => store_state(a.conv_storage.as_ref(), &mut a.conv_state, t)?,
+                None => a.conv_state = None,
+            }
+            match &s.1 {
+                Some(t) => store_state(a.rec_storage.as_ref(), &mut a.recurrent_state, t)?,
+                None => a.recurrent_state = None,
+            }
+        }
+        Ok(())
+    }
+
     fn uses_fixed_kv(&self) -> bool {
         matches!(
             &self.token_mixer,
             TokenMixer::FullAttention(a) if a.kv_cache.fixed_cap().is_some()
         )
     }
+}
+
+/// 图内常量：全部在捕获**之前**建好，图里只引用、不新建。
+///
+/// 由来（实测）：candle 的 `Tensor::arange` / `Tensor::full` 是「CPU 建 Vec 再 H2D」，
+/// 捕获进图后 H2D 节点指向的 host 缓冲在捕获结束时就被释放，replay 读到垃圾值；
+/// 垃圾值当索引用时直接越界（compute-sanitizer 报 badd_u32 读非法地址）。
+/// 所以凡是「与 token 无关的常量张量」一律在这里一次性建好。
+#[derive(Debug, Clone)]
+struct GraphConsts {
+    /// [cap] u32，0..cap
+    mask_idx: Tensor,
+    /// [1, 1, 1, cap]，-inf
+    mask_neg: Tensor,
+    /// [1, 1, 1, cap]，0
+    mask_zero: Tensor,
+    /// [1] u32，固定 [0]：图内只支持单 token，seq 恒为 1
+    offsets: Tensor,
+}
+
+impl GraphConsts {
+    fn new(cap: usize, dtype: DType, dev: &Device) -> Result<Self> {
+        Ok(Self {
+            mask_idx: Tensor::arange(0u32, cap as u32, dev)?,
+            mask_neg: Tensor::full(f32::NEG_INFINITY, (1, 1, 1, cap), dev)?.to_dtype(dtype)?,
+            mask_zero: Tensor::zeros((1, 1, 1, cap), dtype, dev)?,
+            offsets: Tensor::arange(0u32, 1u32, dev)?,
+        })
+    }
+}
+
+/// 持久状态缓冲：模型生命周期内地址不变，图内只能原地写。
+///
+/// 由来（实测）：实例化图时用了 AUTO_FREE_ON_LAUNCH（不用它第二次 cuGraphLaunch 就
+/// 报 CUDA_ERROR_INVALID_VALUE），代价是每次 replay 结束后，图内由 alloc 节点分配的
+/// 显存全部回收。而 candle 的状态更新习惯是"算出新张量再赋给字段"，字段里存的是
+/// **捕获那一刻**的地址 —— replay 时那张新张量在另一块显存上，字段却还指着旧的，
+/// 现象就是状态每步丢失、生成退化成反复吐同几个字。
+/// 所以凡是要跨 replay 存活的张量（GDN 的 conv/recurrent 状态、logits）都在捕获前
+/// 分配成固定缓冲，图内原地写，字段只指向这块缓冲。
+#[derive(Debug, Clone)]
+struct StateBuf {
+    /// 逻辑形状：读取时 reshape 回来
+    shape: Vec<usize>,
+    /// [n] 展平后的存储
+    data: Tensor,
+    /// [rows] u32，与 data 的二维视图配合做原地写
+    rows_idx: Tensor,
+    /// data 二维视图的列数（= 写入并行度，见 store 的说明）
+    cols: usize,
+    /// 不能整除时的退路：[n] u32
+    flat_idx: Tensor,
+}
+
+impl StateBuf {
+    fn zeros(shape: &[usize], dtype: DType, dev: &Device) -> Result<Self> {
+        let n: usize = shape.iter().product();
+        // candle 的 CUDA scatter kernel 只按 numel = left_size * right_size 开线程
+        // （candle-kernels/src/indexing.cu 的 scatter()）。沿 dim0 散写整块时
+        // numel 就等于 right_size，right_size=1 时**整块由一个线程串行搬**
+        // —— 实测 262144 元素要 29.7ms，一 token 37 次原地写就把单步拖到 700ms 以上。
+        // 因此把缓冲看成 [rows, cols] 沿 dim0 散写，让 numel 等于 cols：
+        // 并行度就是 cols，取 ≤4096 且整除 n 的最大值即可（262144→4096、18432→2048）。
+        let cols = (1..=4096).rev().find(|k| n % k == 0).unwrap_or(1);
+        let rows = n / cols;
+        // candle 要求 indexes 与 source 形状一致（scatter_checks），所以把行号广播成 [rows, cols]
+        let rows_idx = Tensor::arange(0u32, rows as u32, dev)?
+            .reshape((rows, 1))?
+            .broadcast_as((rows, cols))?
+            .contiguous()?;
+        Ok(Self {
+            shape: shape.to_vec(),
+            data: Tensor::zeros(n, dtype, dev)?,
+            rows_idx,
+            cols,
+            flat_idx: Tensor::arange(0u32, n as u32, dev)?,
+        })
+    }
+
+    /// 逻辑形状的视图（同一块存储，地址不变）
+    fn view(&self) -> Result<Tensor> {
+        self.data.reshape(self.shape.as_slice())
+    }
+
+    fn len(&self) -> usize {
+        self.data.elem_count()
+    }
+
+    fn store(&self, src: &Tensor) -> Result<()> {
+        let src = src.flatten_all()?.to_dtype(self.data.dtype())?.contiguous()?;
+        if src.elem_count() != self.len() {
+            candle::bail!(
+                "持久缓冲元素数不符: 缓冲 {} 来源 {}",
+                self.len(),
+                src.elem_count()
+            )
+        }
+        if self.cols == 1 {
+            return self.data.scatter_set(&self.flat_idx, &src, 0);
+        }
+        let rows = self.len() / self.cols;
+        // reshape 是视图，散写落在同一块存储上
+        let dst = self.data.reshape((rows, self.cols))?;
+        let src = src.reshape((rows, self.cols))?;
+        dst.scatter_set(&self.rows_idx, &src, 0)
+    }
+}
+
+/// 把状态写回槽位：有持久缓冲就原地写（图内必须），否则退回"算完换张量"。
+fn store_state(storage: Option<&StateBuf>, slot: &mut Option<Tensor>, src: &Tensor) -> Result<()> {
+    match storage {
+        Some(sb) if sb.len() == src.elem_count() => {
+            sb.store(src)?;
+            *slot = Some(sb.view()?);
+        }
+        _ => *slot = Some(src.clone()),
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -868,6 +1218,15 @@ pub struct ModelWeights {
     dtype: DType,
     /// (num_kv_heads, head_dim)：所有全注意力层一致，用于每步构造一份写入索引
     kv_shape: (usize, usize),
+    /// 固定 KV 缓冲的容量（图内读整段时用，等于 FixedKvCache::max_seq）
+    kv_cap: usize,
+    /// 首次用时懒捕获的 decode 步图（Q35_CUDA_GRAPH=1 才启用）
+    graph: Option<Arc<DecodeGraph>>,
+    /// 图内常量（捕获前建好），未走图时为 None
+    graph_consts: Option<GraphConsts>,
+    /// logits 的持久缓冲：图内写、replay 后读（AUTO_FREE 会回收图内分配的 logits）
+    logits_buf: Option<StateBuf>,
+    vocab_size: usize,
 }
 
 impl ModelWeights {
@@ -969,6 +1328,7 @@ impl ModelWeights {
             Ok(tensor) => tensor,
             Err(_) => gg.tensor("token_embd.weight")?,
         };
+        let vocab_size = lm_head_tensor.shape().dims()[0];
         let lm_head = QMatMul::from_weights(lm_head_tensor.into())?;
 
         Ok(Self {
@@ -978,6 +1338,11 @@ impl ModelWeights {
             lm_head,
             device: device.clone(),
             kv_shape: (num_kv_heads, head_dim),
+            kv_cap,
+            graph: None,
+            graph_consts: None,
+            logits_buf: None,
+            vocab_size,
             dtype,
         })
     }
@@ -990,23 +1355,237 @@ impl ModelWeights {
         Tensor::from_slice(&mask, (b, 1, tgt, tgt + offset), &self.device)?.to_dtype(self.dtype)
     }
 
+    /// eager 前向：位置来自 host 整数 offset，因果掩码在 host 上构造。
     pub fn forward(&mut self, input: &Tensor, offset: usize) -> Result<Tensor> {
         let (b, l) = input.dims2()?;
-        let mut h = self.embed_tokens.forward(input)?;
+        let pos_t = Tensor::new(offset as u32, &self.device)?;
         let causal_mask = if l == 1 {
             None
         } else {
             Some(self.causal_mask(b, l, offset)?)
         };
-        // 所有全注意力层共用同一份写入索引：位置取自 device 张量（host 整数会被烘进图），
-        // 且只构造一次，避免每层重复 4 个算子。
-        // Concat 变体不需要索引（append 自己拼），跳过构造省掉每步 4 个算子。
-        let kv_ids = if self.layers.iter().any(|l| l.uses_fixed_kv()) {
-            let pos_t = Tensor::new(offset as u32, &self.device)?;
-            FixedKvCache::index_for(&pos_t, l, self.kv_shape.0, self.kv_shape.1)?
-        } else {
-            Tensor::new(&[0u32], &self.device)?
+        let kv_ids = self.kv_ids_for(&pos_t, l)?;
+        let ctx = StepCtx {
+            offset,
+            pos_t: &pos_t,
+            kv_ids: &kv_ids,
+            mask: causal_mask.as_ref(),
+            cap: None,
         };
+        // 自检开关：先跑图内路径（读整段 + device 掩码），比对后再用 eager 产出正式结果。
+        // 顺序不能反——GDN 的循环状态每跑一次就前进一格，不幂等，所以第二遍前必须恢复状态。
+        // KV 写入是幂等的（同一位置写同一份 k/v），不需要恢复。
+        if l == 1 && bucket_check_enabled() && self.kv_cap > 0 && self.layers.iter().any(|l| l.uses_fixed_kv()) {
+            let snap = self.snapshot_gdn_states()?;
+            let want = self.forward_bucketed(input, &pos_t, self.kv_cap)?;
+            let c = want.argmax(D::Minus1)?.to_dtype(DType::U32)?.to_vec1::<u32>()?;
+            self.restore_gdn_states(&snap)?;
+            let out = self.forward_inner(input, &ctx)?;
+            let diff = (&out - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            let a = out.argmax(D::Minus1)?.to_dtype(DType::U32)?.to_vec1::<u32>()?;
+            if a != c {
+                candle::bail!("[bucket-check] offset={offset} argmax 不一致: eager {a:?} vs 图内 {c:?}")
+            }
+            tracing::warn!("[bucket-check] offset={offset} max_abs_diff={diff:.3e} argmax={a:?}");
+            return Ok(out);
+        }
+        self.forward_inner(input, &ctx)
+    }
+
+    /// 图内 decode 一步：位置只从 device 张量 pos_t 读，KV 读整段 cap，
+    /// 因果掩码也在 device 上构造。整条路径的形状与数值都不含 host 常量，
+    /// 捕获一次后可反复 replay（replay 之间只要更新 pos_t 的内容）。
+    ///
+    /// 只在 l == 1 时可用：prefill 的 seq 长度是 host 常量、形状随轮次变化，
+    /// 属于分桶要解决的问题，不在本函数范围内。
+    pub fn forward_bucketed(&mut self, input: &Tensor, pos_t: &Tensor, cap: usize) -> Result<Tensor> {
+        let (_, l) = input.dims2()?;
+        if l != 1 {
+            candle::bail!("图内前向只支持单 token，实际 l={l}")
+        }
+        stage!("bucket.kv_ids");
+        let kv_ids = self.kv_ids_for(pos_t, l)?;
+        stage!("bucket.mask");
+        let mask = decode_mask(pos_t, cap, self.dtype, self.graph_consts.as_ref())?;
+        let ctx = StepCtx {
+            offset: 0,
+            pos_t,
+            kv_ids: &kv_ids,
+            mask: Some(&mask),
+            cap: Some(cap),
+        };
+        let out = self.forward_inner(input, &ctx)?;
+        // 图内必须把 logits 落到持久缓冲：AUTO_FREE_ON_LAUNCH 会在 replay 结束时回收
+        // 图内分配的显存，直接返回那张张量等于返回一块随时会失效的地址。
+        match &self.logits_buf {
+            Some(b) => {
+                b.store(&out)?;
+                b.view()
+            }
+            None => Ok(out),
+        }
+    }
+
+    /// 捕获前把 GDN 状态缓冲分配好。只作用于线性注意力层，全注意力层没有循环状态。
+    fn prepare_persistent_state(&mut self) -> Result<()> {
+        let dev = self.device.clone();
+        let act_dtype = self.embed_tokens.embeddings().dtype();
+        for layer in &mut self.layers {
+            if let TokenMixer::LinearAttention(a) = &mut layer.token_mixer {
+                a.prepare_state_storage(1, act_dtype, &dev)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// CUDA Graph decode 一步：首次调用时懒捕获，之后每步只更新输入再 replay。
+    ///
+    /// 捕获那一次会真跑前向（会推进 GDN 循环状态、写一行 KV），因此：
+    /// - 捕获前快照 GDN 状态，捕获后恢复；
+    /// - KV 那行是原地写，随后的真实 replay 会把它覆盖成正确值。
+    pub fn forward_graph(&mut self, token: u32, offset: usize) -> Result<Tensor> {
+        self.forward_graph_inner(token, offset).map_err(stage_err)
+    }
+
+    fn forward_graph_inner(&mut self, token: u32, offset: usize) -> Result<Tensor> {
+        if offset >= self.kv_cap {
+            candle::bail!(
+                "位置 {offset} 超出 KV 缓冲容量 {}：请调大 max_seq 或关掉 Q35_CUDA_GRAPH",
+                self.kv_cap
+            )
+        }
+        if self.graph.is_none() {
+            let dev = self.device.clone();
+            let cap = self.kv_cap;
+            // 捕获前必须先用 eager 跑一次同形状的 decode 步。
+            // 原因（实测）：candle 的 per-device workspace、量化 matmul 的 scratch 缓冲
+            // 都在「第一次遇到某种形状」时分配、并把旧缓冲释放掉，而**捕获期内释放显存是
+            // 非法的**（cuMemFreeAsync 返回 CUDA_ERROR_INVALID_VALUE）。冷启动直接捕获会在
+            // 某个需要换 workspace 尺寸的算子上炸掉，报错位置还会随形状漂移，极具误导性。
+            // 图内常量先建好（arange/full 是 CPU→H2D，捕获进图会读垃圾，见 GraphConsts）
+            self.graph_consts = Some(GraphConsts::new(cap, self.dtype, &self.device)?);
+            // 状态缓冲必须先于捕获分配好：图内只能原地写，不能再申请显存
+            self.prepare_persistent_state()?;
+            // candle 的图内 H2D 防护：开着这个 guard 时，小段 host 常量（算子参数、
+            // arange 之类）第一次用会被缓存成常驻显存块，捕获期再遇到缓存未命中就
+            // 直接报错而不是静默把 host 指针烤进图里。暖机必须在 guard 内跑，
+            // 否则捕获期全是未命中。
+            let _htod_guard = match &self.device {
+                Device::Cuda(d) => Some(d.enable_cuda_graph_htod_cache()),
+                _ => None,
+            };
+            let snap = self.snapshot_gdn_states()?;
+            let x = Tensor::new(&[[token]], &self.device)?;
+            let pos0 = Tensor::new(&[offset as u32], &self.device)?;
+            stage!("warmup");
+            // 暖机必须跑**捕获时那条路径**（forward_bucketed），否则 candle 的算子参数
+            // 缓存里缺的就是 bucketed 独有的那些 dims/stride 向量，捕获期直接报未命中。
+            let warm = self
+                .forward_bucketed(&x, &pos0, cap)
+                .map_err(|e| candle::Error::Msg(format!("暖机 bucketed 步失败: {e}")))?;
+            // logits 持久缓冲照暖机产出的 dtype 建（Q4 反量化是 F32，不是元数据里的 F16）
+            self.logits_buf = Some(StateBuf::zeros(
+                &[1, self.vocab_size],
+                warm.dtype(),
+                &self.device,
+            )?);
+            self.restore_gdn_states(&snap)?;
+            // 第二次暖机：上一遍没有 logits 持久缓冲，图里会多出几条 scatter_set / reshape，
+            // 它们的参数向量不在 candle 的 h2d param cache 里，捕获期直接报未命中。
+            // 状态在两次暖机之间恢复，语义等价于同一步只跑一次。
+            self.forward_bucketed(&x, &pos0, cap)
+                .map_err(|e| candle::Error::Msg(format!("暖机 bucketed 步(带缓冲)失败: {e}")))?;
+            self.restore_gdn_states(&snap)?;
+            stage!("graph.capture");
+            let g = DecodeGraph::capture(&dev, cap, offset as u32, |i, p, c| {
+                self.forward_bucketed(i, p, c).map_err(stage_err)
+            })?;
+            if !no_restore() {
+                self.restore_gdn_states(&snap)?;
+            }
+            self.graph = Some(Arc::new(g));
+            if perf_enabled() {
+                tracing::warn!("[graph] decode 步已捕获，cap={cap}");
+            }
+        }
+        // 对拍：eager 先算参考值（会推进 GDN 状态），算完恢复，再 replay。
+        let want = if graph_check_enabled() {
+            let snap = self.snapshot_gdn_states()?;
+            let x = Tensor::new(&[[token]], &self.device)?;
+            let out = self.forward(&x, offset)?;
+            self.restore_gdn_states(&snap)?;
+            Some(out)
+        } else {
+            None
+        };
+        let g = self.graph.as_ref().expect("上面刚设过");
+        stage!("graph.set");
+        g.set(token, offset as u32)?;
+        stage!("graph.launch");
+        if std::env::var("Q35_GRAPH_SYNC").is_ok_and(|v| v == "1") {
+            let _ = self.device.synchronize();
+            if let Device::Cuda(d) = &self.device {
+                match d.cuda_stream().context().check_err() {
+                    Ok(()) => tracing::warn!("[graph-sync] launch 前 ok"),
+                    Err(e) => tracing::warn!("[graph-sync] launch 前有错误: {e}"),
+                }
+            }
+        }
+        let out = g.replay()?;
+        stage!("graph.done");
+        if let Some(want) = want {
+            let diff = (&want - &out)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            let a = want.argmax(D::Minus1)?.to_dtype(DType::U32)?.to_vec1::<u32>()?;
+            let b = out.argmax(D::Minus1)?.to_dtype(DType::U32)?.to_vec1::<u32>()?;
+            if a != b {
+                candle::bail!("[graph-check] offset={offset} argmax 不一致: eager {a:?} vs 图 {b:?}")
+            }
+            tracing::warn!("[graph-check] offset={offset} max_abs_diff={diff:.3e} argmax={a:?}");
+        }
+        Ok(out)
+    }
+    /// 所有全注意力层共用同一份写入索引：位置取自 device 张量（host 整数会被烘进图），
+    /// 且只构造一次，避免每层重复 4 个算子。
+    /// Concat 变体不需要索引（append 自己拼），跳过构造省掉每步 4 个算子。
+    /// 快照 / 恢复 GDN 层的循环状态（conv + recurrent）。
+    ///
+    /// 只给自检用：GDN 的递推每跑一次 token 就前进一格，同一 token 跑两遍会推进两格。
+    /// Tensor 的 clone 是共享存储，但 GDN 更新走的是"算新张量再赋值"，不会原地改旧存储，
+    /// 所以快照在第二遍跑完后仍然有效。
+    fn snapshot_gdn_states(&self) -> Result<Vec<(Option<Tensor>, Option<Tensor>)>> {
+        self.layers.iter().map(|l| l.states()).collect()
+    }
+
+    /// 恢复快照（按引用传，调用方常常要恢复两次：暖机一次、捕获一次）
+    fn restore_gdn_states(&mut self, snap: &[(Option<Tensor>, Option<Tensor>)]) -> Result<()> {
+        for (layer, s) in self.layers.iter_mut().zip(snap) {
+            layer.set_states(s)?;
+        }
+        Ok(())
+    }
+
+    fn kv_ids_for(&self, pos_t: &Tensor, l: usize) -> Result<Tensor> {
+        if self.layers.iter().any(|l| l.uses_fixed_kv()) {
+            // 走图时用捕获前建好的常量偏移，避免 Tensor::arange 的 H2D 节点被捕获
+            match &self.graph_consts {
+                Some(c) if c.offsets.elem_count() == l => {
+                    FixedKvCache::index_for_with(pos_t, &c.offsets, self.kv_shape.0, self.kv_shape.1)
+                }
+                _ => FixedKvCache::index_for(pos_t, l, self.kv_shape.0, self.kv_shape.1),
+            }
+        } else {
+            Tensor::new(&[0u32], &self.device)
+        }
+    }
+
+    fn forward_inner(&mut self, input: &Tensor, ctx: &StepCtx) -> Result<Tensor> {
+        let (_, l) = input.dims2()?;
+        let offset = ctx.offset;
+        stage!("embed");
+        let mut h = self.embed_tokens.forward(input)?;
+        if stop_hit("embed") {
+            return h.narrow(1, l - 1, 1)?.squeeze(1);
+        }
         // 计时探针：不做任何强制同步，只记录 CPU 侧耗时；
         // 需要精确 GPU 时间时由调用方（pipe）在整轮结束处同步一次。
         let mut gdn_mix = std::time::Duration::ZERO;
@@ -1014,18 +1593,19 @@ impl ModelWeights {
         let mut mlp_t = std::time::Duration::ZERO;
         let mut n_gdn = 0usize;
         let mut n_full = 0usize;
-        for layer in &mut self.layers {
+        let layer_limit = graph_layer_limit();
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            if layer_limit.is_some_and(|n| i >= n) {
+                break;
+            }
             let mut kind = "";
             let (mut tm, mut tp) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
-            h = layer.forward(
-                &h,
-                causal_mask.as_ref(),
-                offset,
-                &kv_ids,
-                &mut kind,
-                Some(&mut tm),
-                Some(&mut tp),
-            )?;
+            h = layer
+                .forward(&h, ctx, &mut kind, Some(&mut tm), Some(&mut tp))
+                .map_err(|e| {
+                    let s = stage::get();
+                    candle::Error::Msg(format!("[stage={s}] layer{i}({kind}) {e}"))
+                })?;
             if kind == "gdn" {
                 n_gdn += 1;
                 gdn_mix += tm;
@@ -1040,7 +1620,12 @@ impl ModelWeights {
                 "[q35-layers] l={l} offset={offset} gdn({n_gdn})={gdn_mix:.1?} full({n_full})={full_mix:.1?} mlp={mlp_t:.1?}"
             );
         }
+        stage!("final_norm");
         let h = self.norm.forward(&h)?;
+        if stop_hit("final_norm") {
+            return h.narrow(1, l - 1, 1)?.squeeze(1);
+        }
+        stage!("lm_head");
         let last_hidden = h.narrow(1, l - 1, 1)?;
         self.lm_head.forward(&last_hidden)?.squeeze(1)
     }

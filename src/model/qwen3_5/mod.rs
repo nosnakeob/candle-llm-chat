@@ -1,5 +1,6 @@
 pub mod chunked_scan;
 pub mod dense;
+pub mod graph;
 pub mod kv_buffer;
 pub mod quantized;
 
@@ -39,5 +40,14 @@ impl ModelInference for QuantizedModelWeights {
     fn reset_kv_cache(&mut self) -> anyhow::Result<()> {
         self.clear_kv_cache();
         Ok(())
+    }
+
+    fn supports_graph(&self) -> bool {
+        self::quantized::graph_enabled()
+    }
+
+    fn forward_token(&mut self, token: u32, index_pos: usize) -> anyhow::Result<Tensor> {
+        self.forward_graph(token, index_pos)
+            .map_err(|e| anyhow::anyhow!("forward_graph: {e}"))
     }
 }

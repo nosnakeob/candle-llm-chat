@@ -380,8 +380,13 @@ impl ChatPipeline {
 
         let greedy = self.infer_conf.temperature <= 1e-9;
         let t0 = std::time::Instant::now();
-        let input = Tensor::new(input_arr, &self.infer_conf.device)?.unsqueeze(0)?;
-        let mut logits = self.model.forward(&input, idx_pos, vision)?;
+        // 解码步（单 token）且模型支持时走 CUDA Graph：整步已捕获成一张图，重放即可。
+        let mut logits = if ans_start_idx.is_some() && self.model.supports_graph() {
+            self.model.forward_token(input_arr[0], idx_pos)?
+        } else {
+            let input = Tensor::new(input_arr, &self.infer_conf.device)?.unsqueeze(0)?;
+            self.model.forward(&input, idx_pos, vision)?
+        };
         let t_forward = std::time::Instant::now();
         // 展平 leading 维度（GGUF 返回 (1, 1, vocab_size)，sample 需要 (vocab_size,)）
         while logits.rank() > 1 && logits.dim(0)? == 1 {

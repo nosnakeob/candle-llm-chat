@@ -50,8 +50,8 @@ impl FixedKvCache {
     /// `seq` 必须是 host 常量（graph 捕获时形状固定）。
     ///
     /// 独立成静态函数是因为索引只与 (pos, seq, shape) 有关：整个前向里所有全注意力层
-    /// 共用一份索引，构造一次的 CPU 开销被 6 层摊薄（CPU 提交是这条路径的瓶颈，
-    /// 每层各建一次实测慢约 10%）。
+    /// 共用一份索引，构造一次的 CPU 开销被 6 层摊薄，也少约 20 次算子提交。
+    /// （曾以为每层各建一次会慢 10%，同 session A/B 实测差异在噪声内。）
     pub fn index_for(
         pos_t: &Tensor,
         seq: usize,
@@ -59,13 +59,35 @@ impl FixedKvCache {
         head_dim: usize,
     ) -> Result<Tensor> {
         let offsets = Tensor::arange(0u32, seq as u32, pos_t.device())?;
+        Self::index_for_with(pos_t, &offsets, n_kv_head, head_dim)
+    }
+
+    /// 同 [`Self::index_for`]，但偏移量由调用方给。
+    ///
+    /// CUDA Graph 路径必须用这个版本：`Tensor::arange` 在 candle 里是「CPU 建数组再 H2D」，
+    /// 捕获进图之后那个 host 缓冲早已释放，replay 读到垃圾（实测 arange 回读
+    /// [119297184, 498, 0, 0] 而不是 [0, 1, 2, 3]）。常量要在捕获前建好、之后只传引用。
+    pub fn index_for_with(
+        pos_t: &Tensor,
+        offsets: &Tensor,
+        n_kv_head: usize,
+        head_dim: usize,
+    ) -> Result<Tensor> {
+        let seq = offsets.elem_count();
+        let dev = pos_t.device();
         let pos = pos_t.to_dtype(DType::U32)?.reshape(())?;
-        let rows = pos.broadcast_add(&offsets)?.reshape((seq, 1, 1))?;
-        // broadcast 出来的索引是 stride-0 视图，CUDA 侧 scatter 要求 ids 连续
-        rows.broadcast_as((seq, n_kv_head, head_dim))?.contiguous()
+        let rows = pos.broadcast_add(offsets)?.reshape((seq, 1, 1))?;
+        // 必须是「一次 binary op 直接产出连续张量」，不能 broadcast_as(...).contiguous()：
+        // 后者在 CUDA 上走 copy_strided_src → ucopy_u32，被捕获进 CUDA Graph 之后
+        // replay 时整块读越界（compute-sanitizer 实测：block 0 的每个线程都读垃圾地址，
+        // 报 ILLEGAL_ADDRESS）。zeros 做右操作数的 broadcast_add 结果天然连续，索引值不变。
+        let zeros = Tensor::zeros((seq, n_kv_head, head_dim), DType::U32, dev)?;
+        rows.broadcast_add(&zeros)
     }
 
     /// 用预构造好的索引写入（形状校验交给调用方，索引构造时已固定形状）
+    /// 越界不在这里查：`idx` 是 device 张量，回读要同步、还会破坏图。
+    /// 调用方必须保证 `pos + seq <= max_seq`（`ModelWeights::forward_graph` 里查）。
     pub fn write_indexed(&mut self, idx: &Tensor, k_new: &Tensor, v_new: &Tensor) -> Result<()> {
         self.k.scatter_set(idx, k_new, 0)?;
         self.v.scatter_set(idx, v_new, 0)?;

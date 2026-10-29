@@ -71,6 +71,20 @@ pub trait ModelInference {
     /// 这类实现会在「已经生成过」时返回明确的错误，而不是静默地带着旧状态继续算。
     fn reset_kv_cache(&mut self) -> Result<()>;
 
+    /// 是否支持 CUDA Graph 单 token 前向（默认否）。
+    ///
+    /// 目前只有 Qwen3.5（自实现的混合线性注意力）支持：它的 KV 缓冲容量固定、
+    /// 解码步的全部形状与取值都不含 host 常量，可以整步捕获成一张图。
+    /// 上游 quantized_qwen3 用的是增长的 ConcatKvCache，不满足这个前提。
+    fn supports_graph(&self) -> bool {
+        false
+    }
+
+    /// CUDA Graph 单 token 前向（只处理 seq_len == 1 的解码步）。
+    fn forward_token(&mut self, _token: u32, _index_pos: usize) -> Result<Tensor> {
+        anyhow::bail!("该模型不支持 CUDA Graph 单 token 前向")
+    }
+
     /// 如果是视觉模型，返回视觉配置信息
     fn vision_config(&self) -> Option<&VisionConfig> {
         None
