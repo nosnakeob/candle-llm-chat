@@ -16,6 +16,8 @@ use std::io::{Read, Seek};
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::kv_buffer::FixedKvCache;
+
 pub struct Gguf<R: Read + Seek> {
     ct: gguf_file::Content,
     reader: R,
@@ -121,6 +123,37 @@ impl RotaryEmbedding {
     }
 }
 
+/// KV 存储的两种实现，用 `Q35_CONCAT_KV=1` 切换（默认固定缓冲）。
+///
+/// 保留 Concat 只为 A/B 对照：固定缓冲是 CUDA Graph 的前提（形状恒定），
+/// 但它在 eager 路径上多了 scatter 与索引构造，值多少必须用同一个二进制、
+/// 相邻两跑量出来，而不是跨 session 比历史数字。
+#[derive(Debug, Clone)]
+enum KvStore {
+    Fixed(FixedKvCache),
+    Concat(ConcatKvCache),
+}
+
+impl KvStore {
+    fn fixed_cap(&self) -> Option<usize> {
+        match self {
+            KvStore::Fixed(c) => Some(c.max_seq()),
+            KvStore::Concat(_) => None,
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            KvStore::Fixed(c) => c.reset(),
+            KvStore::Concat(c) => c.reset(),
+        }
+    }
+}
+
+fn use_concat_kv() -> bool {
+    std::env::var("Q35_CONCAT_KV").is_ok_and(|v| v == "1")
+}
+
 #[derive(Debug, Clone)]
 struct AttentionWeights {
     q_proj: QMatMul,
@@ -134,7 +167,7 @@ struct AttentionWeights {
     num_kv_groups: usize,
     head_dim: usize,
     rotary_emb: Arc<RotaryEmbedding>,
-    kv_cache: ConcatKvCache,
+    kv_cache: KvStore,
 }
 
 impl AttentionWeights {
@@ -146,6 +179,8 @@ impl AttentionWeights {
         head_dim: usize,
         rms_norm_eps: f64,
         rotary_emb: Arc<RotaryEmbedding>,
+        act_dtype: DType,
+        kv_cap: usize,
         prefix: &str,
     ) -> Result<Self> {
         let (q_proj, q_out) = gg.qmatmul(&format!("{prefix}.attn_q.weight"))?;
@@ -160,7 +195,17 @@ impl AttentionWeights {
         let q_norm = gg.rms_norm(&format!("{prefix}.attn_q_norm.weight"), rms_norm_eps)?;
         let k_norm = gg.rms_norm(&format!("{prefix}.attn_k_norm.weight"), rms_norm_eps)?;
 
-        let kv_cache = ConcatKvCache::new(2);
+        let kv_cache = if use_concat_kv() {
+            KvStore::Concat(ConcatKvCache::new(2))
+        } else {
+            KvStore::Fixed(FixedKvCache::new(
+                kv_cap,
+                num_kv_heads,
+                head_dim,
+                act_dtype,
+                &gg.device.clone(),
+            )?)
+        };
 
         Ok(Self {
             q_proj,
@@ -178,7 +223,13 @@ impl AttentionWeights {
         })
     }
 
-    fn forward(&mut self, x: &Tensor, attn_mask: Option<&Tensor>, offset: usize) -> Result<Tensor> {
+    fn forward(
+        &mut self,
+        x: &Tensor,
+        attn_mask: Option<&Tensor>,
+        offset: usize,
+        kv_ids: &Tensor,
+    ) -> Result<Tensor> {
         let (b, l, _) = x.dims3()?;
 
         let q_out = self.q_proj.forward(x)?;
@@ -207,7 +258,32 @@ impl AttentionWeights {
 
         let (q, k) = self.rotary_emb.apply(&q, &k, offset)?;
 
-        let (k, v) = self.kv_cache.append(&k, &v)?;
+        let (k, v) = match &mut self.kv_cache {
+            KvStore::Fixed(cache) => {
+                // 索引 kv_ids 由 ModelWeights 每步构造一次（含 device 位置），此处只做写。
+                // decode(l==1) 走 reshape：转置+合并+连续化是三次算子，reshape 是零拷贝视图。
+                let (k_row, v_row) = if l == 1 {
+                    (
+                        k.reshape((self.num_kv_heads, self.head_dim))?
+                            .unsqueeze(0)?,
+                        v.reshape((self.num_kv_heads, self.head_dim))?
+                            .unsqueeze(0)?,
+                    )
+                } else {
+                    (
+                        k.transpose(1, 2)?.squeeze(0)?.contiguous()?,
+                        v.transpose(1, 2)?.squeeze(0)?.contiguous()?,
+                    )
+                };
+                cache.write_indexed(kv_ids, &k_row, &v_row)?;
+                let (k, v) = cache.narrow(offset + l)?;
+                (
+                    k.unsqueeze(0)?.transpose(1, 2)?.contiguous()?, // [1, kv_head, len, d]
+                    v.unsqueeze(0)?.transpose(1, 2)?.contiguous()?,
+                )
+            }
+            KvStore::Concat(cache) => cache.append(&k, &v)?, // 已是 [1, kv_head, len, d]
+        };
 
         let k = repeat_kv(k, self.num_kv_groups)?.contiguous()?;
         let v = repeat_kv(v, self.num_kv_groups)?.contiguous()?;
@@ -238,6 +314,7 @@ impl AttentionWeights {
     }
 
     fn clear_kv_cache(&mut self) {
+        // FixedKvCache 每轮位置从 0 重新写起、读只到已写长度，故无需清零（见 kv_buffer::reset）
         self.kv_cache.reset();
     }
 }
@@ -677,6 +754,8 @@ impl LayerWeights {
         head_dim: usize,
         rms_norm_eps: f64,
         rotary: Arc<RotaryEmbedding>,
+        act_dtype: DType,
+        kv_cap: usize,
         full_attention_interval: usize,
         // Linear attention specifics
         linear_num_key_heads: usize,
@@ -697,6 +776,8 @@ impl LayerWeights {
                 head_dim,
                 rms_norm_eps,
                 rotary,
+                act_dtype,
+                kv_cap,
                 &prefix,
             )?)
         } else {
@@ -733,6 +814,7 @@ impl LayerWeights {
         x: &Tensor,
         mask: Option<&Tensor>,
         offset: usize,
+        kv_ids: &Tensor,
         layer_kind: &mut &'static str,
         t_mixer: Option<&mut std::time::Duration>,
         _t_mlp: Option<&mut std::time::Duration>,
@@ -743,7 +825,7 @@ impl LayerWeights {
         let x = match &mut self.token_mixer {
             TokenMixer::FullAttention(attn) => {
                 *layer_kind = "full";
-                attn.forward(&x, mask, offset)?
+                attn.forward(&x, mask, offset, kv_ids)?
             }
             TokenMixer::LinearAttention(attn) => {
                 *layer_kind = "gdn";
@@ -767,6 +849,13 @@ impl LayerWeights {
             TokenMixer::LinearAttention(attn) => attn.clear_kv_cache(),
         }
     }
+
+    fn uses_fixed_kv(&self) -> bool {
+        matches!(
+            &self.token_mixer,
+            TokenMixer::FullAttention(a) if a.kv_cache.fixed_cap().is_some()
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -777,6 +866,8 @@ pub struct ModelWeights {
     lm_head: QMatMul,
     device: Device,
     dtype: DType,
+    /// (num_kv_heads, head_dim)：所有全注意力层一致，用于每步构造一份写入索引
+    kv_shape: (usize, usize),
 }
 
 impl ModelWeights {
@@ -827,8 +918,21 @@ impl ModelWeights {
             None => DType::F16,
         };
 
+        // KV 缓冲容量：固定分配才有恒定形状。默认取 4096 或模型上下文长度中较小者；
+        // 6 层 × 4096 × kv_head × head_dim × 2 × 2 字节，0.8B 上约 48 MB。
+        let kv_cap = std::env::var("Q35_KV_CAP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(4096)
+            .min(max_position_embeddings);
+
         let embed_tensor = gg.tensor("token_embd.weight")?;
         let embed_tokens = Embedding::new(embed_tensor.dequantize(device)?, hidden_size);
+
+        // KV 缓冲的 dtype 必须与写进去的 k/v 一致（scatter_set 要求 dst/src 同 dtype）。
+        // 激活流是 embedding 输出的 dtype（Q4 权重反量化后为 F32），不是 GGUF 元数据
+        // 里的 general.dtype（那是权重存储格式，这里是 F16）。
+        let act_dtype = embed_tokens.embeddings().dtype();
 
         let rotary = Arc::new(RotaryEmbedding::new(
             dtype,
@@ -848,6 +952,8 @@ impl ModelWeights {
                 head_dim,
                 rms_norm_eps,
                 rotary.clone(),
+                act_dtype,
+                kv_cap,
                 full_attention_interval,
                 linear_num_key_heads,
                 linear_num_value_heads,
@@ -871,6 +977,7 @@ impl ModelWeights {
             norm,
             lm_head,
             device: device.clone(),
+            kv_shape: (num_kv_heads, head_dim),
             dtype,
         })
     }
@@ -891,6 +998,15 @@ impl ModelWeights {
         } else {
             Some(self.causal_mask(b, l, offset)?)
         };
+        // 所有全注意力层共用同一份写入索引：位置取自 device 张量（host 整数会被烘进图），
+        // 且只构造一次，避免每层重复 4 个算子。
+        // Concat 变体不需要索引（append 自己拼），跳过构造省掉每步 4 个算子。
+        let kv_ids = if self.layers.iter().any(|l| l.uses_fixed_kv()) {
+            let pos_t = Tensor::new(offset as u32, &self.device)?;
+            FixedKvCache::index_for(&pos_t, l, self.kv_shape.0, self.kv_shape.1)?
+        } else {
+            Tensor::new(&[0u32], &self.device)?
+        };
         // 计时探针：不做任何强制同步，只记录 CPU 侧耗时；
         // 需要精确 GPU 时间时由调用方（pipe）在整轮结束处同步一次。
         let mut gdn_mix = std::time::Duration::ZERO;
@@ -905,6 +1021,7 @@ impl ModelWeights {
                 &h,
                 causal_mask.as_ref(),
                 offset,
+                &kv_ids,
                 &mut kind,
                 Some(&mut tm),
                 Some(&mut tp),

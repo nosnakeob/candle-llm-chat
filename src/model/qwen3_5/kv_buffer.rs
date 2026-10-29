@@ -8,18 +8,19 @@
 //! 写入位置不能是 host 值。`slice_assign(&[(pos..pos+1), …])` 里的 `pos` 是 host
 //! 传入的整数，捕获时会被烘进图，replay 永远写同一行。位置必须以 device 张量
 //! 参与运算（`pos_t` + arange 的 broadcast_add），这样每次 replay 才知道写哪。
-use candle::{D, DType, Device, Result, Tensor};
+use candle::{DType, Device, Result, Tensor};
 
 /// 单层 KV 的固定容量缓冲，形状 `[max_seq, n_kv_head, head_dim]`
-#[derive(Debug)]
+///
+/// `Clone` 是共享存储（`Tensor` 的 Clone 语义），与 `ConcatKvCache` 一致；
+/// 模型结构体为了 derive 需要它，实际不会去 clone 一份独立缓冲。
+#[derive(Debug, Clone)]
 pub struct FixedKvCache {
     k: Tensor,
     v: Tensor,
     max_seq: usize,
     n_kv_head: usize,
     head_dim: usize,
-    dtype: DType,
-    device: Device,
 }
 
 impl FixedKvCache {
@@ -36,8 +37,6 @@ impl FixedKvCache {
             max_seq,
             n_kv_head,
             head_dim,
-            dtype,
-            device: device.clone(),
         })
     }
 
@@ -45,10 +44,35 @@ impl FixedKvCache {
         self.max_seq
     }
 
-    /// 把 `[seq, n_kv_head, head_dim]` 的 k/v 写到第 `pos_t` 行开始的位置。
+    /// 构造写入索引 `[seq, n_kv_head, head_dim]`：第 i 行要写的缓冲行号 = pos + i。
     ///
-    /// `pos_t` 是 rank-0 的 device 张量（u32/i64 皆可），不是 host 整数 —— 见模块头。
-    /// `seq` 必须是 host 常量（graph 捕获时形状固定），所以它是 usize 参数。
+    /// `pos_t` 是 rank-0 的 **device** 张量（u32/i64 皆可），不是 host 整数 —— 见模块头。
+    /// `seq` 必须是 host 常量（graph 捕获时形状固定）。
+    ///
+    /// 独立成静态函数是因为索引只与 (pos, seq, shape) 有关：整个前向里所有全注意力层
+    /// 共用一份索引，构造一次的 CPU 开销被 6 层摊薄（CPU 提交是这条路径的瓶颈，
+    /// 每层各建一次实测慢约 10%）。
+    pub fn index_for(
+        pos_t: &Tensor,
+        seq: usize,
+        n_kv_head: usize,
+        head_dim: usize,
+    ) -> Result<Tensor> {
+        let offsets = Tensor::arange(0u32, seq as u32, pos_t.device())?;
+        let pos = pos_t.to_dtype(DType::U32)?.reshape(())?;
+        let rows = pos.broadcast_add(&offsets)?.reshape((seq, 1, 1))?;
+        // broadcast 出来的索引是 stride-0 视图，CUDA 侧 scatter 要求 ids 连续
+        rows.broadcast_as((seq, n_kv_head, head_dim))?.contiguous()
+    }
+
+    /// 用预构造好的索引写入（形状校验交给调用方，索引构造时已固定形状）
+    pub fn write_indexed(&mut self, idx: &Tensor, k_new: &Tensor, v_new: &Tensor) -> Result<()> {
+        self.k.scatter_set(idx, k_new, 0)?;
+        self.v.scatter_set(idx, v_new, 0)?;
+        Ok(())
+    }
+
+    /// 一步到位：内部构造索引再写（单层/测试用；模型前向请走 `index_for` + `write_indexed`）
     pub fn write_at(&mut self, pos_t: &Tensor, k_new: &Tensor, v_new: &Tensor) -> Result<()> {
         let seq = k_new.dim(0)?;
         if k_new.dims() != [seq, self.n_kv_head, self.head_dim] {
@@ -59,21 +83,8 @@ impl FixedKvCache {
                 k_new.dims()
             )
         }
-        let idx = self.row_index(pos_t, seq)?;
-        // broadcast 出来的索引是 stride-0 视图，scatter 只接受 contiguous
-        let idx = idx
-            .broadcast_as((seq, self.n_kv_head, self.head_dim))?
-            .contiguous()?;
-        self.k.scatter_set(&idx, k_new, 0)?;
-        self.v.scatter_set(&idx, v_new, 0)?;
-        Ok(())
-    }
-
-    /// 图内用：`[seq, n_kv_head, head_dim]` 的行号张量（未 broadcast）
-    fn row_index(&self, pos_t: &Tensor, seq: usize) -> Result<Tensor> {
-        let offsets = Tensor::arange(0u32, seq as u32, pos_t.device())?;
-        let pos = pos_t.to_dtype(DType::U32)?.reshape(())?;
-        pos.broadcast_add(&offsets)?.reshape((seq, 1, 1))
+        let idx = Self::index_for(pos_t, seq, self.n_kv_head, self.head_dim)?;
+        self.write_indexed(&idx, k_new, v_new)
     }
 
     /// eager 用：读出前 `len` 行，等价于 `ConcatKvCache::append` 的返回值
@@ -92,19 +103,14 @@ impl FixedKvCache {
         (&self.k, &self.v)
     }
 
-    pub fn reset(&mut self) -> Result<()> {
-        self.k = Tensor::zeros(
-            (self.max_seq, self.n_kv_head, self.head_dim),
-            self.dtype,
-            &self.device,
-        )?;
-        self.v = Tensor::zeros(
-            (self.max_seq, self.n_kv_head, self.head_dim),
-            self.dtype,
-            &self.device,
-        )?;
-        Ok(())
-    }
+    /// 新的一轮生成开始。
+    ///
+    /// 刻意**不清零**，两条理由：
+    /// 1. 没有可读到的脏数据。每步都是先 `write_at` 写第 `offset` 行起，再用
+    ///    `narrow(len)` 取视图，而 `len = offset + l`；旧一轮残留的行全部落在
+    ///    `len` 之外，永远不会进入 attention。
+    /// 2. 重建张量会让已捕获的 graph 指向旧地址。真要清也不能重新分配。
+    pub fn reset(&mut self) {}
 }
 
 #[cfg(test)]
