@@ -43,7 +43,8 @@ impl ModelInference for QuantizedModelWeights {
     }
 
     fn supports_graph(&self) -> bool {
-        self::quantized::graph_enabled()
+        // 图捕获只对 CUDA 有意义；CPU 上退回 eager
+        self::quantized::graph_enabled() && self.device().is_cuda()
     }
 
     fn forward_token(&mut self, token: u32, index_pos: usize) -> anyhow::Result<Tensor> {

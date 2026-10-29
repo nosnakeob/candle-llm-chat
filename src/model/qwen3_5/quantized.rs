@@ -274,9 +274,17 @@ fn no_restore() -> bool {
     *CACHED.get_or_init(|| std::env::var("Q35_GRAPH_NO_RESTORE").is_ok_and(|v| v == "1"))
 }
 
+/// decode 步是否走 CUDA Graph。默认开启（Q35_CUDA_GRAPH=0 关闭）。
+///
+/// 0.8B Q4 上 decode 21.3 → 87.5 tok/s，是当前最大的单项收益，
+/// 因此默认打开；留关闭开关是为了排查「图路径与 eager 不一致」这类问题。
 pub fn graph_enabled() -> bool {
     static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| std::env::var("Q35_CUDA_GRAPH").is_ok_and(|v| v == "1"))
+    *CACHED.get_or_init(|| {
+        std::env::var("Q35_CUDA_GRAPH")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
 }
 
 fn graph_check_enabled() -> bool {
@@ -1247,6 +1255,11 @@ pub struct ModelWeights {
 }
 
 impl ModelWeights {
+    /// 计算所在设备。CUDA Graph 只在 CUDA 上有意义，supports_graph 据它判断。
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
     pub fn from_gguf<R: Read + Seek>(
         ct: gguf_file::Content,
         reader: &mut R,

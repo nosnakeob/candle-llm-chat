@@ -302,6 +302,26 @@ cargo run --release --example bench_conv1d
 > 本机 GPU 时钟随负载在 772MHz~3060MHz 间浮动，同一段代码相隔几分钟重测可差一个量级。
 > 报任何"优化了 N 倍"之前先用 `bench_env` 确认当时的时钟与离散度，否则数字是噪声。
 
+### 推理开关
+
+| 环境变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `Q35_CUDA_GRAPH` | 开 | decode 步走 CUDA Graph 捕获+重放；`=0` 退回 eager（排查图路径与 eager 不一致时用） |
+| `Q35_KV_CAP` | 4096 | 固定容量 KV 缓冲的槽数，取 `min(值, 模型上下文长度)`；超出直接报错 |
+| `Q35_PERF` | 关 | 打印 `[q35-alloc]` 等分配/计时打点 |
+| `Q35_BUCKET_CHECK` | 关 | 校验分桶路径与普通路径输出一致 |
+
+本机实测（RTX 5060 Ti 16G，Qwen3.5-0.8B Q4_K_M，256 token 固定长度 3 轮中位）：
+
+| 路径 | tok/s | 拆分 |
+| --- | --- | --- |
+| eager | 29.95 | submit 30.04ms (88%) / penalty 0.23ms / sample 4.01ms |
+| CUDA Graph | 87.41 | submit 1.25ms (10%) / penalty 0.28ms / sample 11.13ms (88%) |
+
+图路径与 eager 输出逐字节一致（`GEN_LEN=64` 对拍）。注意两处已知约束：
+- 捕获期内不能有 H2D 拷贝或现场建张量 —— candle 的 `Tensor::arange`/`full` 是「CPU 建 Vec 再 H2D」，必须提前建成常量。
+- candle 的 bitonic sort kernel 靠共享内存，248k 词表要 1MB，超出单 block 上限，设备端排序对本模型不可用；top-p 采样走 `utils::sampling` 的 quickselect。
+
 ---
 
 ## 许可证
