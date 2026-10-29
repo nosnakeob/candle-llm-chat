@@ -2,6 +2,7 @@ pub mod chat;
 pub mod env_guard;
 pub mod hf;
 pub mod load;
+pub mod sampling;
 
 use candle::quantized::gguf_file::Content;
 use tracing::info;

@@ -30,6 +30,9 @@ async-stream = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
 
+# 采样用的 StdRng（与 candle-transformers 同代 rand 0.9，只链接一份）
+rand = "0.9"
+
 tracing = "0.1"
 
 config = "0.15"

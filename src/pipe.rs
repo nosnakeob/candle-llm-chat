@@ -3,11 +3,11 @@ use crate::model::VisionInput;
 use crate::model::config::{InferenceConfig, ModelLoader};
 use crate::model::registry::ModelRegistry;
 use crate::utils::chat::ChatContext;
+use crate::utils::sampling::Sampler;
 use anyhow::{Error, Result};
 use async_stream::try_stream;
-use candle::{D, DType, Tensor};
+use candle::{DType, Tensor};
 use candle_examples::token_output_stream::TokenOutputStream;
-use candle_transformers::generation::LogitsProcessor;
 use futures_core::stream::Stream;
 use serde_json::Value;
 use std::fs;
@@ -45,7 +45,7 @@ impl DecodeStats {
 pub struct ChatPipeline {
     model: Box<dyn ModelInference>,
     tos: TokenOutputStream,
-    logits_processor: LogitsProcessor,
+    sampler: Sampler,
     ctx: ChatContext,
     infer_conf: InferenceConfig,
     eos_token_id: u32,
@@ -69,8 +69,7 @@ impl ChatPipeline {
         let device = &config.device;
         let arch = model_id.split_once('.').map(|(a, _)| a).unwrap_or(model_id);
 
-        let logits_processor =
-            LogitsProcessor::new(config.seed, Some(config.temperature), config.top_p);
+        let sampler = Sampler::new(config.seed, Some(config.temperature), config.top_p);
 
         let ctx = ChatContext::from_repo(&hub_info.tokenizer_repo).await?;
 
@@ -104,7 +103,7 @@ impl ChatPipeline {
         Ok(Self {
             model,
             tos: TokenOutputStream::new(tokenizer),
-            logits_processor,
+            sampler,
             ctx,
             infer_conf: config,
             eos_token_id,
@@ -378,7 +377,6 @@ impl ChatPipeline {
             None => ctx_tokens,
         };
 
-        let greedy = self.infer_conf.temperature <= 1e-9;
         let t0 = std::time::Instant::now();
         // 解码步（单 token）且模型支持时走 CUDA Graph：整步已捕获成一张图，重放即可。
         let mut logits = if ans_start_idx.is_some() && self.model.supports_graph() {
@@ -409,16 +407,9 @@ impl ChatPipeline {
 
         let t_penalty = std::time::Instant::now();
 
-        // 贪心路径：设备端 argmax，只回读 4 个字节。
-        // 采样路径仍留在 host（精确 top_p 要排序，candle 0.11 没有 device sort）。
-        // 实测两条路径同场对比 22.38 vs 22.31 tok/s —— 248k 词表的整表回读
-        // 只值一两个百分点，不是瓶颈；留着 argmax 是因为它免费且免了 1MB 拷贝。
-        let token = if greedy {
-            // argmax(dim=-1) 不保留维度，rank 0 直接取标量
-            logits.argmax(D::Minus1)?.to_scalar::<u32>()?
-        } else {
-            self.logits_processor.sample(&logits).map_err(Error::msg)?
-        };
+        // 采样：贪心走设备端 argmax，只回读 4 字节；top-p 走 quickselect 选核，
+        // 不再对 248k 词表做全量 argsort（那一步实测 16.5ms，是 decode 的最大单项）。
+        let token = self.sampler.sample(&logits)?;
         let t_end = std::time::Instant::now();
 
         let (mut submit, mut penalty, mut sample) = self.last_split.unwrap_or_default();
@@ -462,22 +453,19 @@ fn repeat_penalty_inplace(logits: &Tensor, penalty: f32, context: &[u32]) -> Res
         return Ok(logits.clone());
     }
 
-    // 只把被惩罚的位置取下来（<= repeat_last_n 个标量），算完用 index_add 写回
-    let idx = Tensor::from_vec(ids.clone(), ids.len(), device)?;
+    // 全程留在设备上：只把被惩罚的那几十个 logit 取出来算，算完用 index_add 写回。
+    // 早先版本在这中间做了一次 to_vec1 —— 那是一次隐式 synchronize，CUDA Graph
+    // 重放时它会把整张图的执行时间都记到「惩罚」这一段头上。
+    let n = ids.len();
+    let idx = Tensor::from_vec(ids, n, device)?;
     let picked = logits.index_select(&idx, 0)?.to_dtype(DType::F32)?;
-    let picked = picked.to_vec1::<f32>()?;
-    let adjusted: Vec<f32> = picked
-        .iter()
-        .map(|&v| if v >= 0. { v / penalty } else { v * penalty })
-        .collect();
-
-    // 差值写回：index_add(dim=0) 把 (n) 加到对应行上
-    let delta: Vec<f32> = adjusted
-        .iter()
-        .zip(picked.iter())
-        .map(|(n, o)| n - o)
-        .collect();
-    let delta = Tensor::from_vec(delta, ids.len(), device)?;
+    let is_pos = picked.ge(0f32)?.to_dtype(DType::F32)?;
+    let is_neg = (&is_pos.neg()? + 1f64)?;
+    debug_assert_eq!(is_neg.elem_count(), n);
+    let scaled_down = (&picked / penalty as f64)?;
+    let scaled_up = (&picked * penalty as f64)?;
+    let adjusted = ((&scaled_down * &is_pos)? + (&scaled_up * &is_neg)?)?;
+    let delta = (&adjusted - &picked)?.to_dtype(logits.dtype())?;
     Ok(logits.index_add(&idx, &delta, 0)?)
 }
 
