@@ -8,11 +8,15 @@ fn main() -> Result<()> {
         let idx = Tensor::arange(0u32, n as u32, &dev)?;
         let src = Tensor::ones(n, DType::F32, &dev)?;
         // 预热
-        for _ in 0..3 { dst.scatter_set(&idx, &src, 0)?; }
+        for _ in 0..3 {
+            dst.scatter_set(&idx, &src, 0)?;
+        }
         dev.synchronize()?;
         let t = Instant::now();
         let reps = 20;
-        for _ in 0..reps { dst.scatter_set(&idx, &src, 0)?; }
+        for _ in 0..reps {
+            dst.scatter_set(&idx, &src, 0)?;
+        }
         dev.synchronize()?;
         let per = t.elapsed().as_secs_f64() * 1e3 / reps as f64;
         println!("scatter_set n={n}: {per:.3} ms/次");
@@ -23,7 +27,10 @@ fn main() -> Result<()> {
             let _ = (&dst + &src)?;
         }
         dev.synchronize()?;
-        println!("  add n={n}: {:.3} ms/次", t.elapsed().as_secs_f64() * 1e3 / reps as f64);
+        println!(
+            "  add n={n}: {:.3} ms/次",
+            t.elapsed().as_secs_f64() * 1e3 / reps as f64
+        );
     }
     Ok(())
 }

@@ -106,7 +106,8 @@ impl DecodeGraph {
         let idx00 = Tensor::zeros((1, 1), DType::U32, dev).map_err(|e| ctx("建 idx00", e))?;
         // 捕获那一次也真跑前向：位置先设成真实行号，捕获写完的行随后会被 replay 覆盖。
         let init = Tensor::new(&[init_pos], dev).map_err(|e| ctx("建 init", e))?;
-        pos.scatter_set(&idx0, &init, 0).map_err(|e| ctx("写初始位置", e))?;
+        pos.scatter_set(&idx0, &init, 0)
+            .map_err(|e| ctx("写初始位置", e))?;
 
         let stream: Arc<CudaStream> = cuda_dev.cuda_stream();
         // 捕获前先同步：残留的在飞 kernel 会让捕获失败
@@ -131,7 +132,9 @@ impl DecodeGraph {
         let graph = stream
             .end_capture(flags)
             .map_err(|e| candle::Error::Msg(format!("end_capture: {e}")))?
-            .ok_or_else(|| candle::Error::Msg("end_capture 返回 None：没有捕获到任何算子".into()))?;
+            .ok_or_else(|| {
+                candle::Error::Msg("end_capture 返回 None：没有捕获到任何算子".into())
+            })?;
         dev.synchronize().map_err(|e| ctx("实例化后同步", e))?;
         drain_stale_ctx_error(dev);
         Ok(Self {
@@ -148,7 +151,8 @@ impl DecodeGraph {
     /// 把本步的 token 与位置写进静态缓冲（图外执行）
     pub fn set(&self, token: u32, pos: u32) -> Result<()> {
         drain_stale_ctx_error(&self.dev);
-        let ctx = |what: &str, e: candle::Error| candle::Error::Msg(format!("graph set/{what}: {e}"));
+        let ctx =
+            |what: &str, e: candle::Error| candle::Error::Msg(format!("graph set/{what}: {e}"));
         // 形状必须严格对齐 candle 的 scatter_checks：src 与 dest 同 rank、非 dim 维相等，
         // 且 indexes 与 src 形状完全一致。所以 input 用 [1,1] 源配 idx00，pos 用 [1] 源配 idx0。
         let t = Tensor::new(&[[token]], &self.dev).map_err(|e| ctx("建 token", e))?;

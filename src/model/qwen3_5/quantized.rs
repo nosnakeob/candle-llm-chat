@@ -127,7 +127,10 @@ impl RotaryEmbedding {
     pub fn apply_dev(&self, q: &Tensor, k: &Tensor, pos_t: &Tensor) -> Result<(Tensor, Tensor)> {
         let (_, _, seq_len, _) = q.dims4()?;
         let offsets = Tensor::arange(0u32, seq_len as u32, pos_t.device())?;
-        let idx = pos_t.to_dtype(DType::U32)?.reshape(())?.broadcast_add(&offsets)?;
+        let idx = pos_t
+            .to_dtype(DType::U32)?
+            .reshape(())?
+            .broadcast_add(&offsets)?;
         let cos = self.cos.index_select(&idx, 0)?.to_dtype(q.dtype())?;
         let sin = self.sin.index_select(&idx, 0)?.to_dtype(q.dtype())?;
         let q_embed = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
@@ -246,7 +249,9 @@ macro_rules! stage {
 /// 诊断开关：跑到指定阶段就返回零张量（二分定位图内非法访问的算子）
 fn graph_stop() -> Option<String> {
     static CACHED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    CACHED.get_or_init(|| std::env::var("Q35_GRAPH_STOP").ok()).clone()
+    CACHED
+        .get_or_init(|| std::env::var("Q35_GRAPH_STOP").ok())
+        .clone()
 }
 
 fn stop_hit(name: &str) -> bool {
@@ -733,9 +738,18 @@ impl GatedDeltaNetWeights {
 
     /// 走图前分配持久状态显存。形状取 decode 步的定值（batch=1、seq=1）：
     /// prefill 与 decode 写回的状态元素数相同，共用一块缓冲即可。
-    fn prepare_state_storage(&mut self, batch: usize, act_dtype: DType, dev: &Device) -> Result<()> {
+    fn prepare_state_storage(
+        &mut self,
+        batch: usize,
+        act_dtype: DType,
+        dev: &Device,
+    ) -> Result<()> {
         let pad = self.conv_kernel_size - 1;
-        self.conv_storage = Some(StateBuf::zeros(&[batch, self.conv_dim, pad], act_dtype, dev)?);
+        self.conv_storage = Some(StateBuf::zeros(
+            &[batch, self.conv_dim, pad],
+            act_dtype,
+            dev,
+        )?);
         // 递推状态在 delta rule 内部一律走 F32
         self.rec_storage = Some(StateBuf::zeros(
             &[batch, self.num_v_heads, self.head_v_dim, self.head_k_dim],
@@ -1177,7 +1191,10 @@ impl StateBuf {
     }
 
     fn store(&self, src: &Tensor) -> Result<()> {
-        let src = src.flatten_all()?.to_dtype(self.data.dtype())?.contiguous()?;
+        let src = src
+            .flatten_all()?
+            .to_dtype(self.data.dtype())?
+            .contiguous()?;
         if src.elem_count() != self.len() {
             candle::bail!(
                 "持久缓冲元素数不符: 缓冲 {} 来源 {}",
@@ -1375,16 +1392,28 @@ impl ModelWeights {
         // 自检开关：先跑图内路径（读整段 + device 掩码），比对后再用 eager 产出正式结果。
         // 顺序不能反——GDN 的循环状态每跑一次就前进一格，不幂等，所以第二遍前必须恢复状态。
         // KV 写入是幂等的（同一位置写同一份 k/v），不需要恢复。
-        if l == 1 && bucket_check_enabled() && self.kv_cap > 0 && self.layers.iter().any(|l| l.uses_fixed_kv()) {
+        if l == 1
+            && bucket_check_enabled()
+            && self.kv_cap > 0
+            && self.layers.iter().any(|l| l.uses_fixed_kv())
+        {
             let snap = self.snapshot_gdn_states()?;
             let want = self.forward_bucketed(input, &pos_t, self.kv_cap)?;
-            let c = want.argmax(D::Minus1)?.to_dtype(DType::U32)?.to_vec1::<u32>()?;
+            let c = want
+                .argmax(D::Minus1)?
+                .to_dtype(DType::U32)?
+                .to_vec1::<u32>()?;
             self.restore_gdn_states(&snap)?;
             let out = self.forward_inner(input, &ctx)?;
             let diff = (&out - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
-            let a = out.argmax(D::Minus1)?.to_dtype(DType::U32)?.to_vec1::<u32>()?;
+            let a = out
+                .argmax(D::Minus1)?
+                .to_dtype(DType::U32)?
+                .to_vec1::<u32>()?;
             if a != c {
-                candle::bail!("[bucket-check] offset={offset} argmax 不一致: eager {a:?} vs 图内 {c:?}")
+                candle::bail!(
+                    "[bucket-check] offset={offset} argmax 不一致: eager {a:?} vs 图内 {c:?}"
+                )
             }
             tracing::warn!("[bucket-check] offset={offset} max_abs_diff={diff:.3e} argmax={a:?}");
             return Ok(out);
@@ -1398,7 +1427,12 @@ impl ModelWeights {
     ///
     /// 只在 l == 1 时可用：prefill 的 seq 长度是 host 常量、形状随轮次变化，
     /// 属于分桶要解决的问题，不在本函数范围内。
-    pub fn forward_bucketed(&mut self, input: &Tensor, pos_t: &Tensor, cap: usize) -> Result<Tensor> {
+    pub fn forward_bucketed(
+        &mut self,
+        input: &Tensor,
+        pos_t: &Tensor,
+        cap: usize,
+    ) -> Result<Tensor> {
         let (_, l) = input.dims2()?;
         if l != 1 {
             candle::bail!("图内前向只支持单 token，实际 l={l}")
@@ -1535,10 +1569,18 @@ impl ModelWeights {
         stage!("graph.done");
         if let Some(want) = want {
             let diff = (&want - &out)?.abs()?.max_all()?.to_scalar::<f32>()?;
-            let a = want.argmax(D::Minus1)?.to_dtype(DType::U32)?.to_vec1::<u32>()?;
-            let b = out.argmax(D::Minus1)?.to_dtype(DType::U32)?.to_vec1::<u32>()?;
+            let a = want
+                .argmax(D::Minus1)?
+                .to_dtype(DType::U32)?
+                .to_vec1::<u32>()?;
+            let b = out
+                .argmax(D::Minus1)?
+                .to_dtype(DType::U32)?
+                .to_vec1::<u32>()?;
             if a != b {
-                candle::bail!("[graph-check] offset={offset} argmax 不一致: eager {a:?} vs 图 {b:?}")
+                candle::bail!(
+                    "[graph-check] offset={offset} argmax 不一致: eager {a:?} vs 图 {b:?}"
+                )
             }
             tracing::warn!("[graph-check] offset={offset} max_abs_diff={diff:.3e} argmax={a:?}");
         }
@@ -1568,9 +1610,12 @@ impl ModelWeights {
         if self.layers.iter().any(|l| l.uses_fixed_kv()) {
             // 走图时用捕获前建好的常量偏移，避免 Tensor::arange 的 H2D 节点被捕获
             match &self.graph_consts {
-                Some(c) if c.offsets.elem_count() == l => {
-                    FixedKvCache::index_for_with(pos_t, &c.offsets, self.kv_shape.0, self.kv_shape.1)
-                }
+                Some(c) if c.offsets.elem_count() == l => FixedKvCache::index_for_with(
+                    pos_t,
+                    &c.offsets,
+                    self.kv_shape.0,
+                    self.kv_shape.1,
+                ),
                 _ => FixedKvCache::index_for(pos_t, l, self.kv_shape.0, self.kv_shape.1),
             }
         } else {
