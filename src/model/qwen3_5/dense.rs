@@ -35,6 +35,9 @@ pub struct TextConfig {
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct RopeParameters {
     pub rope_theta: f64,
+    /// Qwen3.5 只旋转前 head_dim × partial_rotary_factor 维（0.25 → 64/256）。
+    #[serde(default)]
+    pub partial_rotary_factor: Option<f64>,
 }
 
 impl Config {
@@ -46,6 +49,17 @@ impl Config {
 
     pub fn rope_theta(&self) -> f64 {
         self.text_config.rope_parameters.rope_theta
+    }
+
+    /// 实际参与旋转的维度数，取偶数（旋转成对作用）。
+    pub fn rope_dim(&self) -> usize {
+        let factor = self
+            .text_config
+            .rope_parameters
+            .partial_rotary_factor
+            .unwrap_or(1.0);
+        let dim = (self.head_dim() as f64 * factor).round() as usize;
+        (dim / 2 * 2).clamp(2, self.head_dim())
     }
 }
 
@@ -350,11 +364,12 @@ impl Qwen3_5GatedDeltaNet {
 pub struct Qwen3_5TextRotaryEmbedding {
     sin: Tensor,
     cos: Tensor,
+    rot_dim: usize,
 }
 
 impl Qwen3_5TextRotaryEmbedding {
     pub fn new(dtype: DType, cfg: &Config, dev: &Device) -> Result<Self> {
-        let dim = cfg.head_dim();
+        let dim = cfg.rope_dim();
         let max_seq_len = cfg.text_config.max_position_embeddings;
         let inv_freq: Vec<_> = (0..dim)
             .step_by(2)
@@ -369,15 +384,31 @@ impl Qwen3_5TextRotaryEmbedding {
         Ok(Self {
             sin: freqs.sin()?,
             cos: freqs.cos()?,
+            rot_dim: dim,
         })
+    }
+
+    /// 只旋转最后一维的前 rot_dim 维，其余维度原样拼回。
+    fn rope_partial(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+        let head_dim = x.dim(D::Minus1)?;
+        if self.rot_dim >= head_dim {
+            return candle_nn::rotary_emb::rope(&x.contiguous()?, cos, sin);
+        }
+        let xr = candle_nn::rotary_emb::rope(
+            &x.narrow(D::Minus1, 0, self.rot_dim)?.contiguous()?,
+            cos,
+            sin,
+        )?;
+        let xt = x.narrow(D::Minus1, self.rot_dim, head_dim - self.rot_dim)?;
+        Tensor::cat(&[&xr, &xt], D::Minus1)
     }
 
     pub fn apply(&self, q: &Tensor, k: &Tensor, seqlen_offset: usize) -> Result<(Tensor, Tensor)> {
         let (_b_sz, _h, seq_len, _n_embd) = q.dims4()?;
         let cos = self.cos.narrow(0, seqlen_offset, seq_len)?;
         let sin = self.sin.narrow(0, seqlen_offset, seq_len)?;
-        let q_embed = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
-        let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
+        let q_embed = self.rope_partial(q, &cos, &sin)?;
+        let k_embed = self.rope_partial(k, &cos, &sin)?;
         Ok((q_embed, k_embed))
     }
 }

@@ -86,17 +86,25 @@ impl Module for MlpWeights {
 pub struct RotaryEmbedding {
     sin: Tensor,
     cos: Tensor,
+    /// 实际参与旋转的维度数。Qwen3.5 只转前 64 维（GGUF rope.dimension_count），
+    /// 其余维度原样透传 —— 与 llama.cpp 的 ggml_rope_ext(n_rot=64) 对齐。
+    rot_dim: usize,
 }
 
 impl RotaryEmbedding {
     pub fn new(
         dtype: DType,
         head_dim: usize,
+        rot_dim: usize,
         max_position_embeddings: usize,
         rope_theta: f64,
         dev: &Device,
     ) -> Result<Self> {
-        let dim = head_dim;
+        let dim = if rot_dim == 0 || rot_dim > head_dim {
+            head_dim
+        } else {
+            rot_dim
+        };
         let max_seq_len = max_position_embeddings;
         let inv_freq: Vec<_> = (0..dim)
             .step_by(2)
@@ -111,15 +119,31 @@ impl RotaryEmbedding {
         Ok(Self {
             sin: freqs.sin()?,
             cos: freqs.cos()?,
+            rot_dim: dim,
         })
+    }
+
+    /// 对最后一维的前 rot_dim 维做旋转，其余维度原样拼回。
+    fn rope_partial(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+        let head_dim = x.dim(D::Minus1)?;
+        if self.rot_dim >= head_dim {
+            return candle_nn::rotary_emb::rope(&x.contiguous()?, cos, sin);
+        }
+        let xr = candle_nn::rotary_emb::rope(
+            &x.narrow(D::Minus1, 0, self.rot_dim)?.contiguous()?,
+            cos,
+            sin,
+        )?;
+        let xt = x.narrow(D::Minus1, self.rot_dim, head_dim - self.rot_dim)?;
+        Tensor::cat(&[&xr, &xt], D::Minus1)
     }
 
     pub fn apply(&self, q: &Tensor, k: &Tensor, offset: usize) -> Result<(Tensor, Tensor)> {
         let (_, _, seq_len, _) = q.dims4()?;
         let cos = self.cos.narrow(0, offset, seq_len)?.to_dtype(q.dtype())?;
         let sin = self.sin.narrow(0, offset, seq_len)?.to_dtype(q.dtype())?;
-        let q_embed = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
-        let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
+        let q_embed = self.rope_partial(q, &cos, &sin)?;
+        let k_embed = self.rope_partial(k, &cos, &sin)?;
         Ok((q_embed, k_embed))
     }
 
@@ -133,8 +157,8 @@ impl RotaryEmbedding {
             .broadcast_add(&offsets)?;
         let cos = self.cos.index_select(&idx, 0)?.to_dtype(q.dtype())?;
         let sin = self.sin.index_select(&idx, 0)?.to_dtype(q.dtype())?;
-        let q_embed = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
-        let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
+        let q_embed = self.rope_partial(q, &cos, &sin)?;
+        let k_embed = self.rope_partial(k, &cos, &sin)?;
         Ok((q_embed, k_embed))
     }
 }
@@ -833,8 +857,11 @@ impl GatedDeltaNetWeights {
         };
 
         let repeat_n = self.num_v_heads / self.num_k_heads;
-        let q = repeat_interleave(&q, repeat_n, 2)?;
-        let k = repeat_interleave(&k, repeat_n, 2)?;
+        // 与 llama.cpp qwen35.cpp:452-453 的 ggml_repeat_4d 对齐：v_head h 用 k_head
+        // h % num_k_heads（整块平铺），不是 h / repeat_n（逐头交错）。两者只在
+        // num_v_heads != num_k_heads 时不同：0.8B/4B 相等（恒等），27B 是 48 vs 16。
+        let q = tile_heads(&q, repeat_n, 2)?;
+        let k = tile_heads(&k, repeat_n, 2)?;
 
         // 先 clone 出句柄再交给递推：写回时要用 &mut self.recurrent_state
         let initial_state = if use_precomputed_states {
@@ -941,17 +968,18 @@ fn depthwise_conv1d(x: &Tensor, weight: &Tensor, padding: usize) -> Result<Tenso
     Ok(acc)
 }
 
-fn repeat_interleave(img: &Tensor, repeats: usize, dim: usize) -> Result<Tensor> {
+/// 把 dim 上的 n 个头平铺成 repeats*n 个：第 h 个输出头取第 h % n 个输入头。
+fn tile_heads(t: &Tensor, repeats: usize, dim: usize) -> Result<Tensor> {
     if repeats == 1 {
-        return Ok(img.clone());
+        return Ok(t.clone());
     }
-    let mut dims = img.dims().to_vec();
+    let mut dims = t.dims().to_vec();
     dims[dim] *= repeats;
     let final_dims = dims.clone();
-    let img = img.unsqueeze(dim + 1)?;
-    let mut expand_dims = img.dims().to_vec();
-    expand_dims[dim + 1] = repeats;
-    let expanded = img.expand(expand_dims.as_slice())?;
+    let t = t.unsqueeze(dim)?;
+    let mut expand_dims = t.dims().to_vec();
+    expand_dims[dim] = repeats;
+    let expanded = t.expand(expand_dims.as_slice())?;
     expanded.reshape(final_dims.as_slice())
 }
 
@@ -1282,11 +1310,25 @@ impl ModelWeights {
         let key_length = md_get("qwen3.attention.key_length")?.to_u32()? as usize;
 
         let head_dim = key_length;
-        let num_layers = md_get("qwen3.block_count")?.to_u32()? as usize;
+        // block_count 把 MTP（multi-token prediction）头也算成一层：Qwen3.8-27B 报 65，
+        // 但 blk.64 只有 attn_* + nextn.*，真正的 transformer 层是 0..63。
+        // 少减这一层会在最后一步去找 blk.64.attn_qkv.weight 然后报 "cannot find tensor info"。
+        let block_count = md_get("qwen3.block_count")?.to_u32()? as usize;
+        let mtp_layers = md_get("qwen3.nextn_predict_layers")
+            .and_then(|v| v.to_u32())
+            .unwrap_or(0) as usize;
+        let num_layers = block_count.saturating_sub(mtp_layers);
         let hidden_size = md_get("qwen3.embedding_length")?.to_u32()? as usize;
         let max_position_embeddings = md_get("qwen3.context_length")?.to_u32()? as usize;
         let rms_norm_eps = md_get("qwen3.attention.layer_norm_rms_epsilon")?.to_f32()? as f64;
         let rope_freq_base = md_get("qwen3.rope.freq_base")?.to_f32()? as f64;
+        // Qwen3.5 用部分旋转：head_dim=256 但只转前 rope_dim 维（27B/0.8B 都是 64，
+        // GGUF 键 rope.dimension_count）。rope.dimension_sections=[11,11,10] 只用于
+        // 选择位置来源（t/h/w），纯文本时三个位置相同，等价于标准 64 维旋转。
+        let rope_dim = md_get("qwen3.rope.dimension_count")
+            .and_then(|v| v.to_u32())
+            .map(|v| v as usize)
+            .unwrap_or(head_dim);
 
         let full_attention_interval = md_get("qwen3.full_attention_interval")?.to_u32()? as usize;
 
@@ -1315,24 +1357,45 @@ impl ModelWeights {
             .unwrap_or(4096)
             .min(max_position_embeddings);
 
+        // 词表嵌入按 F32 存要 vocab × hidden × 4 字节：0.8B 上是 1.0 GB，
+        // 27B（248320 × 5120）上是 5.1 GB —— 后者直接把 16 GB 卡吃穿。
+        // Q35_EMBED_DTYPE=f16 让它只占一半，查表后补一次 to_dtype 转回 F32，
+        // 下游所有计算精度不变，只损失一次查表的舍入。
+        let embed_dtype = match std::env::var("Q35_EMBED_DTYPE").as_deref() {
+            Ok("f16") | Ok("F16") => DType::F16,
+            Ok("bf16") | Ok("BF16") => DType::BF16,
+            _ => DType::F32,
+        };
         let embed_tensor = gg.tensor("token_embd.weight")?;
-        let embed_tokens = Embedding::new(embed_tensor.dequantize(device)?, hidden_size);
+        let embed_tokens = Embedding::new(
+            embed_tensor.dequantize(device)?.to_dtype(embed_dtype)?,
+            hidden_size,
+        );
 
-        // KV 缓冲的 dtype 必须与写进去的 k/v 一致（scatter_set 要求 dst/src 同 dtype）。
-        // 激活流是 embedding 输出的 dtype（Q4 权重反量化后为 F32），不是 GGUF 元数据
-        // 里的 general.dtype（那是权重存储格式，这里是 F16）。
-        let act_dtype = embed_tokens.embeddings().dtype();
+        // 激活流统一 F32：KV 缓冲、conv/recurrent 状态的 dtype 都跟着它走。
+        // 与嵌入的存储精度解耦，嵌入存半精度时由 forward_inner 补一次转换。
+        let act_dtype = DType::F32;
 
         let rotary = Arc::new(RotaryEmbedding::new(
             dtype,
             head_dim,
+            rope_dim,
             max_position_embeddings,
             rope_freq_base,
             device,
         )?);
+        eprintln!("[load] rope: head_dim={head_dim} rot_dim={rope_dim}");
 
+        eprintln!("[load] metadata ok, embed {embed_dtype:?}, layers={num_layers}");
+        let t_layers = std::time::Instant::now();
         let mut layers = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
+            if i % 8 == 0 {
+                eprintln!(
+                    "[load] layer {i}/{num_layers} {:.1}s",
+                    t_layers.elapsed().as_secs_f32()
+                );
+            }
             layers.push(LayerWeights::new(
                 &mut gg,
                 i,
@@ -1476,7 +1539,7 @@ impl ModelWeights {
     /// 捕获前把 GDN 状态缓冲分配好。只作用于线性注意力层，全注意力层没有循环状态。
     fn prepare_persistent_state(&mut self) -> Result<()> {
         let dev = self.device.clone();
-        let act_dtype = self.embed_tokens.embeddings().dtype();
+        let act_dtype = DType::F32;
         for layer in &mut self.layers {
             if let TokenMixer::LinearAttention(a) = &mut layer.token_mixer {
                 a.prepare_state_storage(1, act_dtype, &dev)?;
@@ -1641,6 +1704,9 @@ impl ModelWeights {
         let offset = ctx.offset;
         stage!("embed");
         let mut h = self.embed_tokens.forward(input)?;
+        if h.dtype() != DType::F32 {
+            h = h.to_dtype(DType::F32)?;
+        }
         if stop_hit("embed") {
             return h.narrow(1, l - 1, 1)?.squeeze(1);
         }
@@ -1664,6 +1730,16 @@ impl ModelWeights {
                     let s = stage::get();
                     candle::Error::Msg(format!("[stage={s}] layer{i}({kind}) {e}"))
                 })?;
+            if std::env::var("Q35_DEBUG_LAYER").is_ok() {
+                let flat = h.flatten_all()?;
+                let amax = flat.abs()?.max(0)?.to_scalar::<f32>()?;
+                let amin = flat.abs()?.min(0)?.to_scalar::<f32>()?;
+                let mean = flat.mean_all()?.to_scalar::<f32>()?;
+                eprintln!(
+                    "[layer {i:02} {kind:4}] amax={amax:.4e} amin={amin:.4e} mean={mean:.4e} dtype={:?}",
+                    h.dtype()
+                );
+            }
             if kind == "gdn" {
                 n_gdn += 1;
                 gdn_mix += tm;
@@ -1712,6 +1788,62 @@ mod dw_tests {
         let want = x.conv1d(&w, pad, 1, 1, c)?;
         let diff = got.sub(&want)?.abs()?.max_all()?.to_scalar::<f32>()?;
         assert!(diff < 1e-4f32, "depthwise 与 naive 差异过大: {diff}");
+        Ok(())
+    }
+
+    /// tile_heads 必须等价于 ggml_repeat_4d：输出头 h 取输入头 h % n。
+    /// 27B 就是靠这条（48 个 v head 对 16 个 k head），写成 repeat_interleave 会乱码。
+    #[test]
+    fn test_tile_heads_matches_ggml_repeat() -> Result<()> {
+        let dev = Device::Cpu;
+        let (b, l, n, d) = (1usize, 2usize, 3usize, 2usize);
+        // 每个头的值 = 头号，便于直接断言
+        let vals: Vec<f32> = (0..b * l * n * d).map(|i| ((i / d) % n) as f32).collect();
+        let x = Tensor::from_vec(vals.clone(), (b, l, n, d), &dev)?;
+
+        let got = tile_heads(&x, 4, 2)?;
+        assert_eq!(got.dims4()?, (b, l, n * 4, d));
+        let out = got.flatten_all()?.to_vec1::<f32>()?;
+
+        // 期望：头序列 0,1,2,0,1,2,0,1,2,0,1,2（平铺），每个头 d 个相同值
+        for l_i in 0..l {
+            for h in 0..n * 4 {
+                let want = (h % n) as f32;
+                for k in 0..d {
+                    let idx = (l_i * n * 4 + h) * d + k;
+                    assert_eq!(out[idx], want, "l={l_i} h={h} k={k}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 部分旋转：rot_dim 之后的维度必须原样保留，rot_dim 之内必须真的被旋转。
+    #[test]
+    fn test_rope_partial_keeps_tail() -> Result<()> {
+        let dev = Device::Cpu;
+        let (head_dim, rot_dim, seq) = (8usize, 4usize, 3usize);
+        let rope = RotaryEmbedding::new(DType::F32, head_dim, rot_dim, 64, 1e7, &dev)?;
+
+        let x = Tensor::ones((1, 1, seq, head_dim), DType::F32, &dev)?;
+        let cos = rope.cos.narrow(0, 0, seq)?;
+        let sin = rope.sin.narrow(0, 0, seq)?;
+        let out = rope.rope_partial(&x, &cos, &sin)?;
+        assert_eq!(out.dims4()?, (1, 1, seq, head_dim));
+
+        let tail = out.narrow(D::Minus1, rot_dim, head_dim - rot_dim)?;
+        let tail_sum = tail.sum_all()?.to_scalar::<f32>()?;
+        assert!(
+            (tail_sum - (seq * (head_dim - rot_dim)) as f32).abs() < 1e-5,
+            "未旋转的尾部被改动: sum={tail_sum}"
+        );
+
+        let head = out
+            .narrow(D::Minus1, 0, rot_dim)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let changed = head.iter().any(|v| (v - 1.0f32).abs() > 1e-6);
+        assert!(changed, "前 rot_dim 维没有被旋转: {head:?}");
         Ok(())
     }
 }
