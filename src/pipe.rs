@@ -71,7 +71,11 @@ impl ChatPipeline {
 
         let sampler = Sampler::new(config.seed, Some(config.temperature), config.top_p);
 
-        let ctx = ChatContext::from_repo(&hub_info.tokenizer_repo).await?;
+        let mut ctx = ChatContext::from_repo(&hub_info.tokenizer_repo).await?;
+        // 诊断开关：Q35_THINKING=1 打开模板的思考分支（部分推理模型关掉思考会退化）
+        if std::env::var("Q35_THINKING").is_ok() {
+            ctx.enable_thinking = true;
+        }
 
         let (model, tokenizer, eos_token_id, stop_tokens) = if arch == "qwen3_vl" {
             let (vl, tok, eos) = Qwen3VL::load(&hub_info, device).await?;
@@ -362,7 +366,20 @@ impl ChatPipeline {
             .tokenizer()
             .encode(string, true)
             .map_err(Error::msg)?;
-        Ok(tokens.get_ids().to_vec())
+        let ids = tokens.get_ids().to_vec();
+        if std::env::var("Q35_DEBUG_IDS").is_ok() {
+            eprintln!(
+                "[ids] n={} first20={:?} last10={:?}",
+                ids.len(),
+                &ids[..ids.len().min(20)],
+                &ids[ids.len().saturating_sub(10)..]
+            );
+            let toks = self.tos.tokenizer();
+            for id in ids.iter().take(6).chain(ids.iter().rev().take(4)) {
+                eprintln!("  id={id} -> {:?}", toks.id_to_token(*id));
+            }
+        }
+        Ok(ids)
     }
 
     fn gen_next_token(
@@ -410,6 +427,21 @@ impl ChatPipeline {
         // 采样：贪心走设备端 argmax，只回读 4 字节；top-p 走 quickselect 选核，
         // 不再对 248k 词表做全量 argsort（那一步实测 16.5ms，是 decode 的最大单项）。
         let token = self.sampler.sample(&logits)?;
+        if std::env::var("Q35_DEBUG_TOK").is_ok() {
+            let top = logits.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+            let mut idx: Vec<usize> = (0..top.len()).collect();
+            idx.sort_unstable_by(|&a, &b| top[b].total_cmp(&top[a]));
+            let head: Vec<String> = idx
+                .iter()
+                .take(5)
+                .map(|&i| format!("#{i}={:.3}", top[i]))
+                .collect();
+            let sum: f32 = top.iter().map(|v| v.max(0.0)).sum();
+            eprintln!(
+                "[tok] pick={token} top5[{}] sumexp={sum:.4}",
+                head.join(" ")
+            );
+        }
         let t_end = std::time::Instant::now();
 
         let (mut submit, mut penalty, mut sample) = self.last_split.unwrap_or_default();

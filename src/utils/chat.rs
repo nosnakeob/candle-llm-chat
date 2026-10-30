@@ -173,7 +173,7 @@ impl ChatContext {
         let template = self.env.get_template("chat").map_err(Error::msg)?;
         // minijinja 3 不再为任意 Serialize 类型自动转 Value，先序列化成 Value 再进模板
         let messages = minijinja::Value::from(minijinja::value::Serde(&self.messages));
-        template
+        let out = template
             .render(minijinja::context! {
                 messages => messages,
                 add_generation_prompt => self.add_generation_prompt,
@@ -181,7 +181,11 @@ impl ChatContext {
                 bos_token => "",
                 eos_token => "",
             })
-            .map_err(Error::msg)
+            .map_err(Error::msg)?;
+        if std::env::var("Q35_DEBUG_PROMPT").is_ok() {
+            eprintln!("[prompt] {out:?}");
+        }
+        Ok(out)
     }
 }
 

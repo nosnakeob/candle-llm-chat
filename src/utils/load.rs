@@ -4,7 +4,7 @@ use regex::Regex;
 use std::{fs::File, path::PathBuf, process::Command};
 use tokenizers::Tokenizer;
 
-use crate::utils::hf::{fetch, fetch_many, list_files_with_prefix, model_repo};
+use crate::utils::hf::{fetch, fetch_local, fetch_many, list_files_with_prefix, model_repo};
 
 /// 从指定仓库下载 GGUF 模型文件，支持下载分片模型文件，会自动检测并合并分片
 ///
@@ -13,6 +13,12 @@ use crate::utils::hf::{fetch, fetch_many, list_files_with_prefix, model_repo};
 /// * `filename` - 模型文件名(不带后缀)
 pub async fn download_gguf(repo: &str, filename: &str) -> Result<PathBuf> {
     let repo = model_repo(repo)?;
+
+    // 精确文件名已在缓存里就直接返回：跳过下面的 list_tree —— 那是一次真实网络
+    // 请求，镜像站偶发卡住时会把整个加载流程挂死（实测挂 20 分钟无输出）。
+    if let Some(path) = fetch_local(&repo, filename).await {
+        return Ok(path);
+    }
 
     // 获取不带后缀的文件名前缀用于分片检测
     let filename_prefix = filename.strip_suffix(".gguf").unwrap_or(filename);

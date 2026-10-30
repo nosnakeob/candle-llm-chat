@@ -49,6 +49,19 @@ pub fn model_repo(repo_id: &str) -> Result<HFRepository<RepoTypeModel>> {
     Ok(client()?.model(owner, name))
 }
 
+/// 只查本地缓存，绝不发网络请求
+pub async fn fetch_local(
+    repo: &HFRepository<RepoTypeModel>,
+    filename: &str,
+) -> Option<std::path::PathBuf> {
+    repo.download_file()
+        .filename(filename)
+        .local_files_only(true)
+        .send()
+        .await
+        .ok()
+}
+
 /// 下载单个文件，返回本地缓存路径
 ///
 /// hf-hub 1.0 的下载接口是 bon builder 风格，必须 `.send()` 才会真正发请求。
@@ -56,7 +69,26 @@ pub async fn fetch(
     repo: &HFRepository<RepoTypeModel>,
     filename: &str,
 ) -> Result<std::path::PathBuf> {
-    Ok(repo.download_file().filename(filename).send().await?)
+    // 先只查本地缓存：命中就直接返回，完全不走网络。
+    // hf-hub 的 download_file 默认会先发 HEAD 校验，命中缓存也要一次往返；
+    // 手工放过缓存的文件（例如用 curl 下载后按 snapshots/<sha>/ 布局放置）更是会被
+    // 当成未缓存重下 9 GB。local_files_only 走 resolve_from_cache_only，raw refs/main
+    // + snapshot 存在即命中。
+    if let Ok(path) = repo
+        .download_file()
+        .filename(filename)
+        .local_files_only(true)
+        .send()
+        .await
+    {
+        eprintln!("[hf] hit {filename}");
+        return Ok(path);
+    }
+    eprintln!("[hf] miss {filename} -> network");
+    let t0 = std::time::Instant::now();
+    let r = repo.download_file().filename(filename).send().await;
+    eprintln!("[hf] done {filename} {:.1}s", t0.elapsed().as_secs_f32());
+    Ok(r?)
 }
 
 /// 并发下载多个文件，保持入参顺序

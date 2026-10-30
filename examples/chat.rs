@@ -24,8 +24,12 @@ async fn main() -> Result<()> {
         prompt
     };
 
-    // 默认模型是 models.toml 里 [qwen3] 下 default = true 的那个
-    let mut pipe = ChatPipeline::default().await?;
+    // 默认模型是 models.toml 里 [qwen3] 下 default = true 的那个；
+    // 设 GEN_MODEL=<registry 键> 可指定，例如 GEN_MODEL=qwen3_5.38_27b_q2k
+    let mut pipe = match std::env::var("GEN_MODEL") {
+        Ok(id) if !id.trim().is_empty() => ChatPipeline::with_default_config(&id).await?,
+        _ => ChatPipeline::default().await?,
+    };
 
     let stream = pipe.chat(&prompt);
     pin_mut!(stream);

@@ -94,3 +94,19 @@ tokenizer_repo = "Qwen/Qwen3.5-0.8B"
 model_repo = "unsloth/Qwen3.5-27B-GGUF"
 model_file = "Qwen3.5-27B-Q4_K_M.gguf"
 tokenizer_repo = "Qwen/Qwen3.5-27B"
+
+# ── Qwen3.8 系列（2026-08 发布，当前最新）────────────────────────────────
+# 与 Qwen3.5 共用同一套 GGUF 架构：general.architecture = qwen35，
+# 元数据键名一字不差（ssm.* / full_attention_interval / rope.dimension_count…），
+# 差别只有规模（65 层 / hidden 5120 / 48 个 v head）和多出来的 MTP 头
+# （nextn.* 张量，本项目不使用，加载时忽略）。
+# 注意 candle 只认 Q2_K~Q6_K / Q4_0 / Q4_1 / Q5_* / Q8_0。
+# unsloth 的 "UD"（Unsloth Dynamic）动态量化大量混用 IQ1_S/IQ2_S/IQ3_XXS/IQ4_XS，
+# 实测 Qwen3.8-27B-UD-Q2_K_XL 的 866 个张量里 IQ 系占 339 个，candle 直接
+# 报 "unknown dtype for tensor 21" → UD 变体一律不可用。
+# 要跑 27B 得用纯 K-quant 权重：bartowski/Qwen3.8-27B-GGUF 的 Q2_K
+# 只含 F32/Q2_K/Q3_K/Q4_K/Q5_K/Q4_0，可加载。
+[qwen3_5.38_27b_q2k]
+model_repo = "bartowski/Qwen3.8-27B-GGUF"
+model_file = "Qwen3.8-27B-Q2_K.gguf"
+tokenizer_repo = "Qwen/Qwen3.8-27B"
