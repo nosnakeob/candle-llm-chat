@@ -95,15 +95,25 @@ fn l2_norm(x: &Tensor) -> Result<Tensor> {
     x.broadcast_mul(&inv_norm)
 }
 
-fn repeat_interleave(x: &Tensor, n: usize, dim: usize) -> Result<Tensor> {
-    if n == 1 {
+/// 把 dim 上的 n 个头平铺成 repeats*n 个：第 h 个输出头取第 h % n 个输入头。
+///
+/// 必须与 quantized 路径（src/model/qwen3_5/quantized.rs 的 tile_heads）以及
+/// llama.cpp qwen35 的 ggml_repeat_4d 一致。
+///
+/// 旧的 repeat_interleave 写法是逐头交错（输出头 h 取输入头 h / repeats），
+/// 只在 num_v_heads == num_k_heads 时与平铺等价。27B 是 48 v-head / 16 k-head
+/// （repeats = 3），交错展开会让每个 v 头读到错误的 k 头，输出直接乱码。
+fn tile_heads(x: &Tensor, repeats: usize, dim: usize) -> Result<Tensor> {
+    if repeats == 1 {
         return Ok(x.clone());
     }
     let mut dims = x.dims().to_vec();
-    dims.insert(dim + 1, n);
-    let expanded = x.unsqueeze(dim + 1)?.broadcast_as(dims.as_slice())?;
-    let mut final_dims = x.dims().to_vec();
-    final_dims[dim] *= n;
+    dims[dim] *= repeats;
+    let final_dims = dims.clone();
+    let x = x.unsqueeze(dim)?;
+    let mut expand_dims = x.dims().to_vec();
+    expand_dims[dim] = repeats;
+    let expanded = x.expand(expand_dims.as_slice())?;
     expanded.reshape(final_dims.as_slice())
 }
 
@@ -337,8 +347,8 @@ impl Qwen3_5GatedDeltaNet {
         };
 
         let repeat_n = self.num_v_heads / self.num_k_heads;
-        let q = repeat_interleave(&q, repeat_n, 2)?;
-        let k = repeat_interleave(&k, repeat_n, 2)?;
+        let q = tile_heads(&q, repeat_n, 2)?;
+        let k = tile_heads(&k, repeat_n, 2)?;
 
         let initial_state = if use_precomputed_states {
             self.recurrent_state.as_ref()
@@ -792,5 +802,50 @@ impl ModelForCausalLM {
 
     pub fn clear_kv_cache(&mut self) {
         self.base_model.clear_kv_cache();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 48 v-head / 16 k-head（27B 实配，repeats = 3）：输出头 h 必须取输入头 h % 16。
+    ///
+    /// 专门防 repeat_interleave 时代的乱码缺陷复活 —— 那种写法下输出头 h
+    /// 取的是输入头 h / 3，与平铺只在极少数 h 上偶然相同。
+    #[test]
+    fn test_tile_heads_48v_16k() -> Result<()> {
+        let dev = Device::Cpu;
+        let (b, l, n_k, d) = (1usize, 2usize, 16usize, 4usize);
+        let repeats = 3usize; // 48 / 16
+        // 每个头的值 = 头号，便于逐元素断言
+        let vals: Vec<f32> = (0..b * l * n_k * d)
+            .map(|i| ((i / d) % n_k) as f32)
+            .collect();
+        let x = Tensor::from_vec(vals, (b, l, n_k, d), &dev)?;
+
+        let out = tile_heads(&x, repeats, 2)?;
+        assert_eq!(out.dims4()?, (b, l, n_k * repeats, d));
+
+        let flat = out.flatten_all()?.to_vec1::<f32>()?;
+        let total_heads = n_k * repeats;
+        for l_i in 0..l {
+            for h in 0..total_heads {
+                let want = (h % n_k) as f32;
+                for k in 0..d {
+                    let idx = (l_i * total_heads + h) * d + k;
+                    assert_eq!(flat[idx], want, "l={l_i} h={h} k={k}");
+                }
+            }
+        }
+
+        // 反证：交错展开（h / repeats）在这些位置上与平铺不同 —— 确认缺陷形态已消除
+        for h in 0..total_heads {
+            let interleaved = (h / repeats) as f32;
+            if interleaved != (h % n_k) as f32 {
+                assert_ne!(flat[h * d], interleaved, "h={h} 仍是交错展开");
+            }
+        }
+        Ok(())
     }
 }
