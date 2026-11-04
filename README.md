@@ -290,7 +290,7 @@ cargo test -- --nocapture
 ```bash
 # 固定长度 decode 基准（3 轮取中位，分开报 prefill 与稳态 decode）
 cargo run --release --example bench_qwen3_5
-BENCH_MODEL=qwen3.0_8b_q4 cargo run --release --example bench_qwen3_5
+BENCH_MODEL=qwen3_5.0_8b_q4 cargo run --release --example bench_qwen3_5
 
 # 测量环境探针：GPU 时钟/利用率 + 各算子的中位数与离散比
 cargo run --release --example bench_env

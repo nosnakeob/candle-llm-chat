@@ -7,7 +7,7 @@
 //! 运行：
 //!   export PATH="/c/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.3/bin/x64:$PATH"
 //!   cargo run --release --example gen_dump
-//!   GEN_MODEL=qwen3.5.0_8b_q4 GEN_LEN=64 GEN_PROMPT="你好" cargo run --release --example gen_dump
+//!   GEN_MODEL=qwen3_5.0_8b_q4 GEN_LEN=64 GEN_PROMPT="你好" cargo run --release --example gen_dump
 use anyhow::Result;
 use candle_llm_chat::model::config::InferenceConfig;
 use candle_llm_chat::pipe::ChatPipeline;

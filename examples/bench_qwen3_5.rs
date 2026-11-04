@@ -2,7 +2,7 @@
 //!
 //! 运行：
 //!   cargo run --release --example bench_qwen3_5
-//!   BENCH_MODEL=qwen3.0_8b_q4 cargo run --release --example bench_qwen3_5
+//!   BENCH_MODEL=qwen3_5.0_8b_q4 cargo run --release --example bench_qwen3_5
 //!
 //! 与 e2e 测试的区别：这里把 sample_len 固定住，输出长度不随模型心情变化，
 //! 于是不同改动之间的 tok/s 可以直接比。
