@@ -55,6 +55,57 @@ impl Default for InferenceConfig {
     }
 }
 
+/// 由 config.json 判定模型架构。
+///
+/// 原先这里硬编码 `ModelArch::Qwen3`，导致下面 match 里 Qwen3VL / Qwen3MoE /
+/// Qwen3_5 三个分支是死代码，非 Qwen3 的 safetensors 仓库会被静默按 Qwen3 解析
+/// （config 字段对不上时只会报一个与真实原因无关的反序列化错误）。
+///
+/// 判据：优先 `model_type`（HF 标准字段，实测取值 qwen3 / qwen3_vl / qwen3_5 /
+/// qwen3_moe），缺失时退回 `architectures[0]`（Qwen3ForCausalLM /
+/// Qwen3VLForConditionalGeneration / Qwen3_5ForConditionalGeneration /
+/// Qwen3MoeForCausalLM）。两者都认不出时明确报错，不猜。
+fn arch_from_config(config: &serde_json::Value) -> Result<ModelArch> {
+    let model_type = config.get("model_type").and_then(|v| v.as_str());
+    let arch0 = config
+        .get("architectures")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str());
+
+    if let Some(mt) = model_type {
+        match mt {
+            "qwen3" => return Ok(ModelArch::Qwen3),
+            "qwen3_vl" | "qwen2_vl" => return Ok(ModelArch::Qwen3VL),
+            "qwen3_moe" | "qwen2_moe" => return Ok(ModelArch::Qwen3MoE),
+            "qwen3_5" | "qwen35" => return Ok(ModelArch::Qwen3_5),
+            _ => {}
+        }
+    }
+
+    if let Some(name) = arch0 {
+        // 顺序敏感：Qwen3Moe* 与 Qwen3_5* 都以 Qwen3 开头，先判更具体的。
+        let n = name.to_ascii_lowercase();
+        if n.contains("moe") {
+            return Ok(ModelArch::Qwen3MoE);
+        }
+        if n.starts_with("qwen3_5") || n.starts_with("qwen35") {
+            return Ok(ModelArch::Qwen3_5);
+        }
+        if n.contains("vl") {
+            return Ok(ModelArch::Qwen3VL);
+        }
+        if n.starts_with("qwen3") || n.starts_with("qwen2") {
+            return Ok(ModelArch::Qwen3);
+        }
+    }
+
+    bail!(
+        "无法识别的模型架构：model_type={model_type:?} architectures={arch0:?}。\
+         请确认仓库的 config.json 完整，或改用受支持的架构。"
+    )
+}
+
 /// 模型加载器 - 专门负责模型相关操作
 pub struct ModelLoader;
 
@@ -130,11 +181,14 @@ impl ModelLoader {
 
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&model_files, DType::BF16, device)? };
 
-        let arch = ModelArch::Qwen3;
-
         // 加载配置文件
         let config_path = fetch(&repo, "config.json").await?;
         let config_content = std::fs::read(&config_path)?;
+
+        // 架构必须由 config.json 判定，不能写死：写死会让下面 match 的
+        // Qwen3VL / Qwen3MoE / Qwen3_5 三个分支永远走不到。
+        let config_value: serde_json::Value = serde_json::from_slice(&config_content)?;
+        let arch = arch_from_config(&config_value)?;
 
         let model: Box<dyn ModelInference> = match arch {
             ModelArch::Qwen3 => {
@@ -166,6 +220,49 @@ impl ModelLoader {
 mod tests {
     use super::*;
     use crate::model::registry::ModelRegistry;
+
+    /// C2 回归：架构由 config.json 判定，四个 ModelArch 分支都必须可达。
+    ///
+    /// 这里覆盖两条判据（model_type 与 architectures[0]），取值来自本机 HF 缓存
+    /// 里四份真实 config.json（Qwen3-4B-Instruct-2507 / Qwen3-VL-2B-Instruct /
+    /// Qwen3.8-27B / Qwen3.5-0.8B），MoE 的架构名按 HF 命名惯例（Qwen3MoeForCausalLM）。
+    #[test]
+    fn test_arch_from_config_dispatch() -> Result<()> {
+        let cases = [
+            (serde_json::json!({"model_type": "qwen3"}), ModelArch::Qwen3),
+            (serde_json::json!({"model_type": "qwen3_vl"}), ModelArch::Qwen3VL),
+            (serde_json::json!({"model_type": "qwen3_moe"}), ModelArch::Qwen3MoE),
+            (serde_json::json!({"model_type": "qwen3_5"}), ModelArch::Qwen3_5),
+            (
+                serde_json::json!({"architectures": ["Qwen3ForCausalLM"]}),
+                ModelArch::Qwen3,
+            ),
+            (
+                serde_json::json!({"architectures": ["Qwen3VLForConditionalGeneration"]}),
+                ModelArch::Qwen3VL,
+            ),
+            (
+                serde_json::json!({"architectures": ["Qwen3MoeForCausalLM"]}),
+                ModelArch::Qwen3MoE,
+            ),
+            (
+                serde_json::json!({"architectures": ["Qwen3_5ForConditionalGeneration"]}),
+                ModelArch::Qwen3_5,
+            ),
+        ];
+        for (cfg, want) in cases {
+            assert_eq!(arch_from_config(&cfg)?, want, "config={cfg}");
+        }
+
+        // 认不出时必须明确报错，绝不能再静默按 Qwen3 解析
+        let unknown = serde_json::json!({
+            "model_type": "llama",
+            "architectures": ["LlamaForCausalLM"]
+        });
+        let err = arch_from_config(&unknown).unwrap_err().to_string();
+        assert!(err.contains("无法识别的模型架构"), "错误信息不够明确: {err}");
+        Ok(())
+    }
 
     #[tokio::test]
     #[ignore] // 需要下载模型文件
